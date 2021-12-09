@@ -29,6 +29,7 @@ In order to make clear whether to add the `class_token` into the module forward 
 * Tokenization:  the token embedding filter can be chosen either `Conv2D` or `Conv3D`, and the initializing weights of `Conv3D` filters from `Conv2D` can be replicated along temporal dimension and averaging them or initialized with zeros along the temporal positions except at the center `t/2`.
  * Temporal `MSA` module weights: one can choose to copy the weights from spatial `MSA` module or initialize all weights with zeros.
  * Initialize from the `MAE` pre-trained model provided by [ZhiLiang](https://github.com/pengzhiliang/MAE-pytorch), where the class_token that does not appear in the `MAE` pre-train model is initialized from truncated normal distribution.
+ * Initialize from the `ViT` pre-trained model can be found [here](https://drive.google.com/file/d/1QjGpbR8K4Cf4TJaDc60liVhBvPtrc2v4/view?usp=sharing).
 
 ## TODO
 - [ ] add more `TimeSformer` and `ViViT` variants pre-trained weights.
