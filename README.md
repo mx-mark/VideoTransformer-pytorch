@@ -96,7 +96,7 @@ python model_inference.py \
 
 | name | pretrain | epochs | num frames | spatial crop | top1_acc | top5_acc | weight | log |
 |:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|
-| TimeSformer-B | ImageNet-21K | 15e | 8 | 224 | 78.4 | 93.6 | Google drive or BaiduYun(code: mae6) | log |
+| TimeSformer-B | ImageNet-21K | 15e | 8 | 224 | 78.4 | 93.6 | [Google drive](https://drive.google.com/file/d/1-BSNROh35fiOIBcmtFNgWHEY_JC5UNDx/view?usp=sharing) or [BaiduYun](https://pan.baidu.com/s/1I5L41ZFHHSvFJttYt8F0Og)(code: yr4j) | log |
 <br />
 
 #### 2. Train Recipe(ablation study)
@@ -104,12 +104,12 @@ python model_inference.py \
 
 | operation | top1_acc | top5_acc | top1_acc (three crop) |
 |:----|:----:|:----:|:----:|
-| base | 68 | 78 | - |
-| + `frame_interval` 4 -> 16 (span more time) | 73(+5) | 93(+) | - |
-| + RandomCrop, flip (overcome overfit) | 75.7(+) | 80.5(+) | - |
-| + `batch size` 16 -> 8 (more iterations) | 75.8 | 81.5 | - |
-| + `frame_interval` 16 -> 24 (span more time) | 77.7(+) | 89 | 78.4 |
-| + `frame_interval` 24 -> 32 (span more time) | 78.4(+0.7) | 93(+4) | 79.1 |
+| base | 68.2 | 87.6 | - |
+| + `frame_interval` 4 -> 16 (span more time) | 72.9(+4.7) | 91.0(+3.4) | - |
+| + RandomCrop, flip (overcome overfit) | 75.7(+2.8) | 92.5(+1.5) | - |
+| + `batch size` 16 -> 8 (more iterations) | 75.8(+0.1) | 92.4(-0.1) | - |
+| + `frame_interval` 16 -> 24 (span more time) | 77.7(+1.9) | 93.3(+0.9) | 78.4 |
+| + `frame_interval` 24 -> 32 (span more time) | 78.4(+0.7) | 94.0(+0.7) | 79.1 |
 
 tips: `frame_interval` and `data augment` counts for the validation accuracy.
 
