@@ -96,7 +96,7 @@ python model_inference.py \
 
 | name | pretrain | epochs | num frames | spatial crop | top1_acc | top5_acc | weight | log |
 |:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|
-| TimeSformer-B | ImageNet-21K | 15e | 8 | 224 | 78.4 | 93.6 | [Google drive](https://drive.google.com/file/d/1-BSNROh35fiOIBcmtFNgWHEY_JC5UNDx/view?usp=sharing) or [BaiduYun](https://pan.baidu.com/s/1I5L41ZFHHSvFJttYt8F0Og)(code: yr4j) | log |
+| TimeSformer-B | ImageNet-21K | 15e | 8 | 224 | 78.4 | 93.6 | [Google drive](https://drive.google.com/file/d/1-BSNROh35fiOIBcmtFNgWHEY_JC5UNDx/view?usp=sharing) or [BaiduYun](https://pan.baidu.com/s/1I5L41ZFHHSvFJttYt8F0Og)(code: yr4j) | [log]((demo/log_arch_timesformer_lr5e-3_bs8_nw4_open.txt)) |
 <br />
 
 #### 2. Train Recipe(ablation study)
