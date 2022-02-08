@@ -3,6 +3,10 @@ This repository is mainly built upon [Pytorch](https://pytorch.org/) and [Pytorc
 
 Now, we implement the [TimeSformer](https://arxiv.org/abs/2102.05095) and [ViViT](https://arxiv.org/abs/2103.15691). And we have pre-trained the `TimeSformer-B` on [Kinetics600](https://deepmind.com/research/open-source/kinetics), but still can't guarantee the performance reported in the paper. However, we find some relevant hyper-parameters which may help us to reach the target performance.
 
+## New Addition
+1. We add the pre-trained weights of `ViViT-B` on [Kinetics400](https://deepmind.com/research/open-source/kinetics). 
+2. We add the [MaskFeat](https://arxiv.org/abs/2112.09133) which performs a mask image modeling method and pretrain the model on [Kinetics400](https://deepmind.com/research/open-source/kinetics). More details will be updated later.
+
 ## Table of Contents
 1. [Difference](#difference)
 2. [TODO](#todo)
@@ -91,13 +95,23 @@ python model_inference.py \
 ```
 
 ## Result
-### Kinetics-600
+### Kinetics-400/600
 
 #### 1. Model Zoo
 
 | name | pretrain | epochs | num frames | spatial crop | top1_acc | top5_acc | weight | log |
 |:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|
 | TimeSformer-B | ImageNet-21K | 15e | 8 | 224 | 78.4 | 93.6 | [Google drive](https://drive.google.com/file/d/1-BSNROh35fiOIBcmtFNgWHEY_JC5UNDx/view?usp=sharing) or [BaiduYun](https://pan.baidu.com/s/1I5L41ZFHHSvFJttYt8F0Og)(code: yr4j) | [log](demo/log_arch_timesformer_lr5e-3_bs8_nw4_open.txt) |
+| ViViT-B | ImageNet-21K | 30e | 16 | 224 | 75.2 | 91.5 | [Google drive](https://drive.google.com/file/d/1-JVhSN3QHKUOLkXLWXWn5drdvKn0gPll/view?usp=sharing) | |
+| MaskFeat | K400(MViT-B) | 100e | 16 | 224 | | | [Google drive](https://drive.google.com/file/d/1h3Q-267qV9kIcTT9Sct-zQzVvXljhyWW/view?usp=sharing) | |
+
+#### 1.1 Visualize
+
+For each column, we show masked input(left), HOG predictions(middle) and original video frame(right).
+<p align="center">
+  <img src="https://user-images.githubusercontent.com/94091472/153032427-732c743d-aaca-4a3f-98ac-ae35b2cf6140.png" width="480">
+</p>
+
 <br />
 
 #### 2. Train Recipe(ablation study)
@@ -140,7 +154,7 @@ tips: Improve the `frame_interval` will drop a lot on time performance.
 
 
 ## Acknowledge
-this repo is built on top of [Pytorch-Lightning](https://pytorch-lightning.readthedocs.io/en/latest/), [decord](https://github.com/dmlc/decord) and [kornia](https://github.com/kornia/kornia). I also learn many code designs from [MMaction2](https://github.com/open-mmlab/mmaction2). I thank the authors for releasing their code.
+this repo is built on top of [Pytorch-Lightning](https://pytorch-lightning.readthedocs.io/en/latest/), [pytorchvideo](https://github.com/facebookresearch/pytorchvideo/tree/9d0ca900f0427ed9b47b6182ad05f75c0e66274b), [skimage](https://github.com/scikit-image/scikit-image), [decord](https://github.com/dmlc/decord) and [kornia](https://github.com/kornia/kornia). I also learn many code designs from [MMaction2](https://github.com/open-mmlab/mmaction2). I thank the authors for releasing their code.
 
 ## Contribution
 I look forward to seeing one can provide some ideas about the repo, please feel free to report it in the issue, or even better, submit a pull request.
