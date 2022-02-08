@@ -190,9 +190,9 @@ class DividedTemporalAttentionWithPreNorm(nn.Module):
         dropout_p = layer_drop.pop('dropout_p')
         layer_drop= layer_drop.pop('type')
         self.layer_drop = layer_drop(dropout_p) if layer_drop else nn.Identity()
-        self.temporal_fc = nn.Linear(self.embed_dims, self.embed_dims)
-
-        self.init_weights(self.temporal_fc)
+        if not use_cls_token:
+            self.temporal_fc = nn.Linear(self.embed_dims, self.embed_dims)
+            self.init_weights(self.temporal_fc)
 
     def init_weights(self, module):
     	if hasattr(module, 'weight') and module.weight is not None:
@@ -228,7 +228,9 @@ class DividedTemporalAttentionWithPreNorm(nn.Module):
         attn_out = self.attn(query, query, query)[0]
         attn_out = rearrange(attn_out, 'n b d -> b n d')
         attn_out = self.layer_drop(self.proj_drop(attn_out.contiguous()))
-        attn_out = self.temporal_fc(attn_out)
+        if not self.use_cls_token:
+            attn_out = self.temporal_fc(attn_out)
+
         
         # Post-Process
         if self.use_cls_token:
