@@ -104,7 +104,7 @@ def parse_args():
 
 def single_run():
 	args = parse_args()
-	os.environ['NCCL_SOCKET_IFNAME'] = args.nccl_ifname #'lan1'
+	#os.environ['NCCL_SOCKET_IFNAME'] = args.nccl_ifname #'lan1'
 	warnings.filterwarnings('ignore')
 	
 	# Experiment Settings
