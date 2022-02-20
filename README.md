@@ -6,6 +6,7 @@ Now, we implement the [TimeSformer](https://arxiv.org/abs/2102.05095) and [ViViT
 ## New Addition
 1. We add the pre-trained weights of `ViViT-B` on [Kinetics400](https://deepmind.com/research/open-source/kinetics). 
 2. We add the [MaskFeat](https://arxiv.org/abs/2112.09133) which performs a mask image modeling method and pretrain the model on [Kinetics400](https://deepmind.com/research/open-source/kinetics). More details will be updated later.
+3. We add a notebook `VideoTransformer_demo.ipynb` to show a demo of video classification task.
 
 ## Table of Contents
 1. [Difference](#difference)
@@ -53,20 +54,29 @@ pip install -r requirements.txt
 ## Usage
 ### Training
 ```bash
-# path to Kinetics600 train set
-TRAIN_DATA_PATH='/path/to/Kinetics600/train_list.txt'
+# path to Kinetics400 train set and val set
+TRAIN_DATA_PATH='/path/to/Kinetics400/train_list.txt'
+VAL_DATA_PATH='/path/to/Kinetics400/val_list.txt'
 # path to root directory
 ROOT_DIR='/path/to/work_space'
 
 python model_pretrain.py \
 	-lr 0.005 \
 	-pretrain 'vit' \
-	-epoch 15 \
+	-objective 'supervised' \
+	-epoch 30 \
 	-batch_size 8 \
-	-num_class 600 \
+	-num_workers 4 \
+	-arch 'timesformer' \
+	-attention_type 'divided_space_time' \
+	-num_frames 8 \ 
 	-frame_interval 32 \
+	-num_class 400 \
+	-optim_type 'sgd' \
+	-lr_schedule 'cosine' \
 	-root_dir ROOT_DIR \
-	-train_data_path TRAIN_DATA_PATH
+	-train_data_path TRAIN_DATA_PATH \
+	-val_data_path VAL_DATA_PATH
 ```
 The minimal folder structure will look like as belows.
 ```
