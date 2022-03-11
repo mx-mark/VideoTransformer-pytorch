@@ -1,12 +1,14 @@
 # PyTorch implementation of Video Transformer Benchmarks
 This repository is mainly built upon [Pytorch](https://pytorch.org/) and [Pytorch-Lightning](https://pytorch-lightning.readthedocs.io/en/latest/). We wish to maintain a collections of scalable video transformer benchmarks, and discuss the training recipes of how to train a big video transformer model.
 
-Now, we implement the [TimeSformer](https://arxiv.org/abs/2102.05095) and [ViViT](https://arxiv.org/abs/2103.15691). And we have pre-trained the `TimeSformer-B` on [Kinetics600](https://deepmind.com/research/open-source/kinetics), but still can't guarantee the performance reported in the paper. However, we find some relevant hyper-parameters which may help us to reach the target performance.
+Now, we implement the [TimeSformer](https://arxiv.org/abs/2102.05095) and [ViViT](https://arxiv.org/abs/2103.15691). And we have pre-trained the `TimeSformer-B`, `ViViT-B` and `MaskFeat` on [Kinetics400/600](https://deepmind.com/research/open-source/kinetics), but still can't guarantee the performance reported in the paper. However, we find some relevant hyper-parameters which may help us to reach the target performance.
 
-## New Addition
+## Update
 1. We add the pre-trained weights of `ViViT-B` on [Kinetics400](https://deepmind.com/research/open-source/kinetics). 
 2. We add the [MaskFeat](https://arxiv.org/abs/2112.09133) which performs a mask image modeling method and pretrain the model on [Kinetics400](https://deepmind.com/research/open-source/kinetics). More details will be updated later.
 3. We add a notebook `VideoTransformer_demo.ipynb` to show a demo of video classification task.
+4. We add a file `visualize_attention.py` to show the attention map of the pre-trained timesformer model.
+5. We create a `create_video_transform` method in `data_transform.py` to match the advanced training recipe adopting by the [MaskFeat](https://arxiv.org/abs/2112.09133).  And with the advanced training recipe, we can train the MViT-B from the scratch to achieve a comparable performance.
 
 ## Table of Contents
 1. [Difference](#difference)
@@ -37,14 +39,14 @@ In order to make clear whether to add the `class_token` into the module forward 
  * Initialize from the `ViT` pre-trained model can be found [here](https://drive.google.com/file/d/1QjGpbR8K4Cf4TJaDc60liVhBvPtrc2v4/view?usp=sharing).
 
 ## TODO
-- [ ] add more `TimeSformer` and `ViViT` variants pre-trained weights.
+- [√] add more `TimeSformer` and `ViViT` variants pre-trained weights.
 	- A larger version and other operation types.
-- [ ] add `linear prob` and `partial fine-tune`.
+- [√] add `linear prob` and `finetune recipe`.
 	- Make available to transfer the pre-trained model to downstream task.
 - [ ] add more scalable Video Transformer benchmarks.
-	- We will also extend to multi-modality version, e.g [Perceiver](https://arxiv.org/abs/2107.14795) is coming soon.
-- [ ] add more diverse objective functions.
-	- Pre-train on larger dataset through the dominated self-supervised methods, e.g Contrastive Learning and [MAE](https://arxiv.org/abs/2111.06377).
+	- We will focus more on the data-efficient models.
+- [ ] add more robust objective functions.
+	- Pre-train the model through the dominated self-supervised methods, e.g [Mask Image Modeling](https://arxiv.org/abs/2111.06377).
 
 ## Setup
 ```bash
@@ -117,9 +119,14 @@ python model_inference.py \
 
 #### 1.1 Visualize
 
-For each column, we show masked input(left), HOG predictions(middle) and original video frame(right).
+For each column, we show the masked input(left), HOG predictions(middle) and original video frame(right).
 <p align="center">
   <img src="https://user-images.githubusercontent.com/94091472/153032427-732c743d-aaca-4a3f-98ac-ae35b2cf6140.png" width="480">
+</p>
+
+Here, we show the extracted attention map of a random frame sampled from the demo video.
+<p align="center">
+  <img src="https://user-images.githubusercontent.com/94091472/157862844-2e380394-d491-415f-a366-7c657918d934.png" width="1500">
 </p>
 
 <br />
