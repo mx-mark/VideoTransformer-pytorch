@@ -9,36 +9,13 @@ import torch.nn as nn
 import torch.optim as optim
 import torchvision
 from torchmetrics import Accuracy
+from timm.loss import SoftTargetCrossEntropy
 
+import utils
+from mixup import Mixup
+from optimizer import build_optimizer
 from transformer import ClassificationHead
-from utils import timeit_wrapper, print_on_rank_zero
 from video_transformer import TimeSformer, ViViT, MaskFeat
-
-def show_trainable_params(named_parameters):
-	for name, param in named_parameters:
-		print(name, param.size())
-
-def build_param_groups(model):
-	params_no_decay = []
-	params_has_decay = []
-	params_no_decay_name = []
-	params_decay_name = []
-	for name, param in model.named_parameters():
-		if not param.requires_grad:
-			continue
-		if len(param) == 1 or name.endswith('.bias'): 
-			params_no_decay.append(param)
-			params_no_decay_name.append(name)
-		else:
-			params_has_decay.append(param)
-			params_decay_name.append(name)
-
-	param_groups = [
-					{'params': params_no_decay, 'weight_decay': 0},
-					{'params': params_has_decay},
-					]
-	print_on_rank_zero(f'params_no_decay_name: {params_no_decay_name} \n params_decay_name: {params_decay_name}')
-	return param_groups
 
 def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, base_lr, objective, min_lr=5e-5, last_epoch=-1):
 	""" Create a schedule with a learning rate that decreases following the
@@ -62,46 +39,58 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
 class VideoTransformer(pl.LightningModule):
 
 	def __init__(self, 
-				 lr,
-				 n_crops,
-				 log_interval,
-				 num_classes,
+				 configs,
 				 trainer,
 				 ckpt_dir,
 				 do_eval,
 				 do_test,
-				 objective,
-				 arch,
-				 save_ckpt_freq,
-				 lr_schedule,
-				 optim_type,
-				 **model_kwargs):
+				 pretrained,
+				 n_crops=3):
 		super().__init__()
-		self.objective = objective
-		self.arch = arch
-		if self.objective =='mim': 
+		self.configs = configs
+		self.trainer = trainer
+		self.momentum_update = False
+
+		# build models
+		if self.configs.objective =='mim': 
 			self.model = MaskFeat(pool_q_stride_size=[[1, 1, 2, 2], [3, 1, 2, 2]], feature_dim=2*2*2*3*9)
-			#self.no_decay_layer = ["pos_embed_spatial", "pos_embed_temporal", "pos_embed_class", "cls_token", 'mask_token']
-			self.save_ckpt_freq = save_ckpt_freq
-		else:
-			if arch == 'vivit':
-				self.model = ViViT(**model_kwargs)
-			else:
-				self.model = TimeSformer(**model_kwargs)
-			self.cls_head = ClassificationHead(num_classes, model_kwargs['embed_dims'])
-			#self.no_decay_layer = ['cls_token','pos_embed','time_embed']
-			self.loss_fn = nn.CrossEntropyLoss()
+		else: # supervised
+			# load pretrain weights from pretrained weight path and model.init_weights method
+			if self.configs.arch == 'vivit':
+				self.model = ViViT(
+					pretrained=pretrained,
+					img_size=self.configs.img_size,
+					num_frames=self.configs.num_frames,
+					attention_type=self.configs.attention_type)
+			elif self.configs.arch == 'timesformer':
+				self.model = TimeSformer(
+					pretrained=pretrained,
+					img_size=self.configs.img_size,
+					num_frames=self.configs.num_frames,
+					attention_type=self.configs.attention_type)
+			else: #mvit
+				self.model = MaskFeat(
+					pool_q_stride_size=[[1, 1, 2, 2], [3, 1, 2, 2]], 
+					feature_dim=2*2*2*3*9,
+					pretrained=pretrained,
+					img_size=self.configs.img_size,
+					num_frames=self.configs.num_frames)
+				for name, param in self.model.decoder_pred.named_parameters():
+					param.requires_grad = False
+		
+			self.cls_head = ClassificationHead(
+				self.configs.num_class, self.model.embed_dims, eval_metrics=self.configs.eval_metrics)
+			
 			self.max_top1_acc = 0
 			self.train_top1_acc = Accuracy()
 			self.train_top5_acc = Accuracy(top_k=5)
+			if self.configs.mixup:
+				self.mixup_fn = Mixup(num_classes=self.configs.num_class)
+				self.loss_fn = SoftTargetCrossEntropy()
+			else:
+				self.loss_fn = nn.CrossEntropyLoss()
 
-		self.trainer = trainer
-		self.lr_schedule = lr_schedule
-		self.optim_type = optim_type
-		self.lr = lr
-		self.n_crops = n_crops
-		self.num_classes = num_classes
-		self.log_interval = log_interval
+		# common
 		self.iteration = 0
 		self.data_start = 0
 		self.ckpt_dir = ckpt_dir
@@ -111,75 +100,96 @@ class VideoTransformer(pl.LightningModule):
 			self.val_top1_acc = Accuracy()
 			self.val_top5_acc = Accuracy(top_k=5)
 		if self.do_test:
+			self.n_crops = n_crops
 			self.test_top1_acc = Accuracy()
-			self.test_top5_acc = Accuracy(top_k=5)  
+			self.test_top5_acc = Accuracy(top_k=5)
+	
+	@torch.jit.ignore
+	def no_weight_decay_keywords(self):
+		return {'pos_embed', 'cls_token', 'mask_token'}
 
 	def configure_optimizers(self):
-		param_groups = build_param_groups(self)
-		lr_schedule = self.lr_schedule 
-		optim_type = self.optim_type
-
-		# optimzer
-		if optim_type == 'sgd':
-			optimizer = optim.SGD(param_groups,
-								  lr=self.lr,
-								  momentum=0.9,
-								  weight_decay=0.0001,
-								  nesterov=True)
+		# build optimzer
+		is_pretrain = not (self.configs.objective == 'supervised')
+		if self.configs.objective == 'supervised' and self.configs.eval_metrics == 'linear_prob':
+			model = self.cls_head.module if hasattr(self.cls_head, 'module') else self.cls_head
+			optimizer = build_optimizer(self.configs, model, is_pretrain=is_pretrain)
 		else:
-			optimizer = torch.optim.AdamW(param_groups, 
-										  lr=self.lr,
-										  betas=(0.9, 0.999),
-										  weight_decay=0.05)
+			optimizer = build_optimizer(self.configs, self, is_pretrain=is_pretrain)
+		#print(optimizer)
+		
 		# lr schedule
 		lr_scheduler = None
+		lr_schedule = self.configs.lr_schedule 
 		if lr_schedule == 'multistep':
 			lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, 
 														  milestones=[5, 11],
 														  gamma=0.1)
 		elif lr_schedule == 'cosine':
-			if self.objective == 'mim':
-				num_warmup_steps = 30
-				num_training_steps = 300
-			else:
-				num_warmup_steps = 2
-				num_training_steps = 30
 			lr_scheduler = get_cosine_schedule_with_warmup(optimizer, 
-														  num_warmup_steps=num_warmup_steps, 
-														  num_training_steps=num_training_steps,
-														  base_lr=self.lr,
-														  objective=self.objective)
+														  num_warmup_steps=self.configs.warmup_epochs, 
+														  num_training_steps=self.trainer.max_epochs,
+														  base_lr=self.configs.lr,
+														  min_lr=self.configs.min_lr,
+														  objective=self.configs.objective)
 		return [optimizer], [lr_scheduler]
 
-	def parse_batch(self, batch):
-		if self.objective == 'mim':
+	def parse_batch(self, batch, train):
+		if self.configs.objective == 'mim':
 			inputs, labels, mask, cube_marker, =  *batch,
 			return inputs, labels, mask, cube_marker
 		else:
 			inputs, labels, = *batch,
+			if self.configs.mixup and train:
+				inputs, labels = self.mixup_fn(inputs, labels)
+				'''
+				bs = inputs.shape[0]
+				if self.configs.data_statics == 'imagenet':
+					mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+				elif self.configs.data_statics == 'kinetics':
+					mean, std = (0.45, 0.45, 0.45), (0.225, 0.225, 0.225)
+				else:
+					mean, std = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
+				for b in range(bs):
+					utils.show_processed_image(inputs[b].permute(0,2,3,1), save_dir='./', mean=mean, std=std, index=b)
+				'''
 			return inputs, labels
-		
-	def comp_grad_norm(self, norm_type):
-		layer_param_scale = []
-		layer_update_scale = []
+
+	# epoch schedule
+	def _get_momentum(self, base_value, final_value):
+		return final_value - (final_value - base_value) * (math.cos(math.pi * self.trainer.current_epoch / self.trainer.max_epochs) + 1) / 2
+
+	def _weight_decay_update(self):
+		for i, param_group in enumerate(self.optimizers().optimizer.param_groups):
+			if i == 1:  # only the first group is regularized
+				param_group["weight_decay"] = self._get_momentum(base_value=self.weight_decay, final_value=self.configs.weight_decay_end)
+
+	def clip_gradients(self, clip_grad, norm_type=2):
 		layer_norm = []
-		for tag, value in self.model.named_parameters():
-			tag = tag.replace('.', '/')
-			if value.grad is not None:
-				layer_norm.append(torch.norm(value.grad.detach(), norm_type))
-			
+		if self.configs.objective == 'supervised' and self.configs.eval_metrics == 'linear_prob':
+			model_wo_ddp = self.cls_head.module if hasattr(self.cls_head, 'module') else self.cls_head
+		else:
+			model_wo_ddp = self.module if hasattr(self, 'module') else self
+		for name, p in model_wo_ddp.named_parameters():
+			if p.grad is not None:
+				param_norm = torch.norm(p.grad.detach(), norm_type)
+				layer_norm.append(param_norm)
+				if clip_grad:
+					clip_coef = clip_grad / (param_norm + 1e-6)
+					if clip_coef < 1:
+						p.grad.data.mul_(clip_coef)
 		total_grad_norm = torch.norm(torch.stack(layer_norm), norm_type)
 		return total_grad_norm
 	
 	def log_step_state(self, data_time, top1_acc=0, top5_acc=0):
 		self.log("time",float(f'{time.perf_counter()-self.data_start:.3f}'),prog_bar=True)
 		self.log("data_time", data_time, prog_bar=True)
-		if self.objective == 'supervised':
+		if self.configs.objective == 'supervised':
 			self.log("top1_acc",top1_acc,on_step=True,on_epoch=False,prog_bar=True)
 			self.log("top5_acc",top5_acc,on_step=True,on_epoch=False,prog_bar=True)
 
 		return None
-	
+
 	def get_progress_bar_dict(self):
 		# don't show the version number
 		items = super().get_progress_bar_dict()
@@ -187,43 +197,50 @@ class VideoTransformer(pl.LightningModule):
 		
 		return items
 
+	# Trainer Pipeline
 	def training_step(self, batch, batch_idx):
 		data_time = float(f'{time.perf_counter() - self.data_start:.3f}')
-		if self.objective == 'mim':
-			inputs, labels, mask, cube_marker = self.parse_batch(batch)
+		if self.configs.objective == 'mim':
+			inputs, labels, mask, cube_marker = self.parse_batch(batch, train=True)
 			preds, loss = self.model(inputs, labels, mask, cube_marker)
-			return {'loss': loss, 'data_time':data_time}
-		else:
-			inputs, labels = self.parse_batch(batch)
-			preds = self.model(inputs)
-			preds = self.cls_head(preds)
-			
-			return {'preds':preds,'labels':labels,'data_time':data_time}
-	
-	def on_before_optimizer_step(self, optimizer, opt_idx):
-		if self.iteration % self.log_interval == self.log_interval-1:
-			lr = optimizer.param_groups[0]['lr']
-			grad_norm = self.comp_grad_norm(norm_type=2.0)
-			self.log("lr",lr,on_step=True,on_epoch=False,prog_bar=True)
-			self.log("grad_norm",grad_norm,on_step=True,on_epoch=False,prog_bar=True)
-
-	def training_step_end(self, outputs):
-		if self.objective == 'mim':
-			loss, data_time = outputs['loss'], outputs['data_time']
 			self.log_step_state(data_time)
+			return {'loss': loss, 'data_time': data_time}
 		else:
-			preds, labels, data_time = outputs['preds'], outputs['labels'], outputs['data_time']
+			inputs, labels = self.parse_batch(batch, train=True)
+			if self.configs.eval_metrics == 'linear_prob':
+				with torch.no_grad():
+					self.model.eval()
+					preds = self.model(inputs)
+			else:
+				if self.configs.arch == 'mvit':
+					preds = self.model.forward_features(inputs)[:, 0]
+				else:
+					preds = self.model(inputs)
+			preds = self.cls_head(preds)
 			loss = self.loss_fn(preds, labels)
-			top1_acc = self.train_top1_acc(preds.softmax(dim=-1), labels)
-			top5_acc = self.train_top5_acc(preds.softmax(dim=-1), labels)
+			top1_acc = self.train_top1_acc(preds.softmax(dim=-1), labels.argmax(-1))
+			top5_acc = self.train_top5_acc(preds.softmax(dim=-1), labels.argmax(-1))
 			self.log_step_state(data_time, top1_acc, top5_acc)
-		self.iteration += 1
+			return {'loss': loss, 'data_time': data_time}
+	
+	def on_after_backward(self):
+		param_norms = self.clip_gradients(self.configs.clip_grad)
+		self._weight_decay_update()
+		# log learning daynamic
+		lr = self.optimizers().optimizer.param_groups[0]['lr']
+		self.log("lr",lr,on_step=True,on_epoch=False,prog_bar=True)
+		self.log("grad_norm",param_norms,on_step=True,on_epoch=False,prog_bar=True)
+	
+	def optimizer_step(self, epoch, batch_idx, optimizer, optimizer_idx,
+		optimizer_closure, on_tpu, using_native_amp, using_lbfgs):
+
+		optimizer.step(closure=optimizer_closure)
 		self.data_start = time.perf_counter()
-		return loss
+		self.iteration += 1
 
 	def training_epoch_end(self, outputs):
 		timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
-		if self.objective == 'supervised':
+		if self.configs.objective == 'supervised':
 			mean_top1_acc = self.train_top1_acc.compute()
 			mean_top5_acc = self.train_top5_acc.compute()
 			self.print(f'{timestamp} - Evaluating mean ',
@@ -236,17 +253,24 @@ class VideoTransformer(pl.LightningModule):
 		save_path = osp.join(self.ckpt_dir, 'last_checkpoint.pth')
 		self.trainer.save_checkpoint(save_path)
 
-		if self.objective == 'mim' and (self.trainer.current_epoch+1) % self.save_ckpt_freq == 0:
+		if self.configs.objective != 'supervised' and (self.trainer.current_epoch+1) % self.configs.save_ckpt_freq == 0:
 			save_path = osp.join(self.ckpt_dir,
 								 f'{timestamp}_'+
 								 f'ep_{self.trainer.current_epoch}.pth')
 			self.trainer.save_checkpoint(save_path)
 
-
 	def validation_step(self, batch, batch_indx):
 		if self.do_eval:
-			inputs, labels = self.parse_batch(batch)
-			preds = self.cls_head(self.model(inputs))
+			inputs, labels = self.parse_batch(batch, train=False)
+			if self.configs.eval_metrics == 'linear_prob':
+				with torch.no_grad():
+					preds = self.model(inputs)
+			else:
+				if self.configs.arch == 'mvit':
+					preds = self.model.forward_features(inputs)[:, 0]
+				else:
+					preds = self.model(inputs)
+			preds = self.cls_head(preds)
 			
 			self.val_top1_acc(preds.softmax(dim=-1), labels)
 			self.val_top5_acc(preds.softmax(dim=-1), labels)
@@ -276,7 +300,7 @@ class VideoTransformer(pl.LightningModule):
 		if self.do_test:
 			inputs, labels = self.parse_batch(batch)
 			preds = self.cls_head(self.model(inputs))
-			preds = preds.view(-1, self.n_crops, self.num_classes).mean(1)
+			preds = preds.view(-1, self.n_crops, self.configs.num_class).mean(1)
 
 			self.test_top1_acc(preds.softmax(dim=-1), labels)
 			self.test_top5_acc(preds.softmax(dim=-1), labels)

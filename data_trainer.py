@@ -6,7 +6,7 @@ import torch.nn as nn
 from torch.utils.data.dataloader import DataLoader
 
 from dataset import Kinetics
-
+import data_transform as T
 
 class DataAugmentation(nn.Module):
 	"""Module to perform data augmentation using Kornia on torch tensors."""
@@ -71,84 +71,94 @@ class Collator(object):
 
 class KineticsDataModule(pl.LightningDataModule):
 	def __init__(self, 
+				 configs,
 				 train_ann_path,
-				 train_align_transform,
-				 train_aug_transform,
-				 train_temporal_sample,
-				 objective,
 				 val_ann_path=None,
-				 val_aug_transform=None,
-				 val_align_transform=None,
-				 val_temporal_sample=None,
 				 test_ann_path=None,
-				 test_align_transform=None,
-				 test_aug_transform=None,
-				 test_temporal_sample=None,
-				 num_class=600, 
-				 num_samples_per_cls=10000,
-				 target_video_len=8,
-				 batch_size=8,
-				 num_workers=4):
+				 ):
 		super().__init__()
 		self.train_ann_path = train_ann_path
-		self.train_align_transform = train_align_transform
-		self.train_aug_transform = train_aug_transform
-		self.train_temporal_sample = train_temporal_sample
 		self.val_ann_path = val_ann_path
-		self.val_align_transform = val_align_transform
-		self.val_aug_transform = val_aug_transform 
-		self.val_temporal_sample = val_temporal_sample
 		self.test_ann_path = test_ann_path
-		self.test_align_transform = test_align_transform
-		self.test_aug_transform = test_aug_transform
-		self.test_temporal_sample = test_temporal_sample
-		self.batch_size = batch_size
-		self.num_workers = num_workers
-		self.target_video_len = target_video_len
-		self.num_class = num_class 
-		self.num_samples_per_cls = num_samples_per_cls
-		self.objective = objective
+		self.configs = configs
 
-	def get_dataset(self, annotation_path, align_transform, aug_transform, temporal_sample):
+	def get_dataset(self, annotation_path, transform, temporal_sample):
 		dataset = Kinetics(
+			self.configs,
 			annotation_path,
-			align_transform=align_transform,
-			aug_transform=aug_transform,
-			temporal_sample=temporal_sample,
-			objective=self.objective,
-			num_class=self.num_class, 
-			num_samples_per_cls=self.num_samples_per_cls,
-			target_video_len=self.target_video_len)
+			transform=transform,
+			temporal_sample=temporal_sample)
 		
 		return dataset
 
 	def setup(self, stage):
+		if self.configs.objective == 'mim':
+			scale = (0.5, 1.0)
+			color_jitter = None
+		else:
+			color_jitter = 0.4
+			scale = None
+		
+		if self.configs.data_statics == 'imagenet':
+			mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+		elif self.configs.data_statics == 'kinetics':
+			mean, std = (0.45, 0.45, 0.45), (0.225, 0.225, 0.225)
+		else:
+			mean, std = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
+		
+		train_transform = T.create_video_transform(
+			input_size=self.configs.img_size,
+			is_training=True,
+			scale=scale,
+			hflip=0.5,
+			color_jitter=color_jitter,
+			auto_augment=self.configs.auto_augment,
+			interpolation='bicubic',
+			mean=mean,
+			std=std)
+		train_temporal_sample = T.TemporalRandomCrop(
+			self.configs.num_frames * self.configs.frame_interval)
+			
 		self.train_dataset = self.get_dataset(
 			self.train_ann_path,
-			self.train_align_transform,
-			self.train_aug_transform,
-			self.train_temporal_sample)
+			train_transform,
+			train_temporal_sample)
 		
 		if self.val_ann_path is not None:
+			val_transform = T.create_video_transform(
+				input_size=self.configs.img_size,
+				is_training=False,
+				interpolation='bicubic',
+				mean=mean,
+				std=std)
+			val_temporal_sample = T.TemporalRandomCrop(
+				self.configs.num_frames * self.configs.frame_interval)
 			self.val_dataset = self.get_dataset(
 				self.val_ann_path,
-				self.val_align_transform,
-				self.val_aug_transform,
-				self.val_temporal_sample)
+				val_transform,
+				val_temporal_sample)
 		
 		if self.test_ann_path is not None:
+			# need to update
+			test_transform = T.Compose([
+				T.Resize(scale_range=(-1, 256)),
+				T.ThreeCrop(size=self.configs.img_size),
+				T.ToTensor(),
+				T.Normalize(mean, std),
+				])
+			test_temporal_sample = T.TemporalRandomCrop(
+				self.configs.num_frames * self.configs.frame_interval)
 			self.test_dataset = self.get_dataset(
 				self.test_ann_path,
-				self.test_align_transform,
-				self.test_aug_transform,
-				self.test_temporal_sample)
+				test_transform,
+				test_temporal_sample)
 
 	def train_dataloader(self):
 		return DataLoader(
 			self.train_dataset,
-			batch_size=self.batch_size,
-			num_workers=self.num_workers,
-			collate_fn=Collator(self.objective).collate,
+			batch_size=self.configs.batch_size,
+			num_workers=self.configs.num_workers,
+			#collate_fn=Collator(self.objective).collate,
 			shuffle=True,
 			drop_last=True, 
 			pin_memory=True
@@ -158,9 +168,9 @@ class KineticsDataModule(pl.LightningDataModule):
 		if self.val_ann_path is not None:
 			return DataLoader(
 				self.val_dataset,
-				batch_size=self.batch_size,
-				num_workers=self.num_workers,
-				collate_fn=Collator(self.objective).collate,
+				batch_size=self.configs.batch_size,
+				num_workers=self.configs.num_workers,
+				#collate_fn=Collator(self.objective).collate,
 				shuffle=False,
 				drop_last=False,
 			)
@@ -169,13 +179,14 @@ class KineticsDataModule(pl.LightningDataModule):
 		if self.test_ann_path is not None:
 			return DataLoader(
 				self.test_dataset,
-				batch_size=self.batch_size,
-				num_workers=self.num_workers,
-				collate_fn=Collator(self.objective).collate,
+				batch_size=self.configs.batch_size,
+				num_workers=self.configs.num_workers,
+				#collate_fn=Collator(self.objective).collate,
 				shuffle=False,
 				drop_last=False,
 			)
-
+	
+	'''
 	def on_after_batch_transfer(self, batch, dataloader_idx):
 		if not self.trainer.testing:
 			b, t, *_, = *batch[0].shape,
@@ -194,3 +205,4 @@ class KineticsDataModule(pl.LightningDataModule):
 		
 		batch[0] = rearrange(video, '(b t) c h w -> b t c h w', t=t)
 		return batch
+	'''

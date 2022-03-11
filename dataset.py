@@ -1,13 +1,9 @@
-import glob
 import json
-import os
-import os.path as osp
+import random
 
 import decord
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from einops import rearrange
 from skimage.feature import hog
@@ -16,70 +12,29 @@ from mask_generator import CubeMaskGenerator
 class_labels_map = None
 cls_sample_cnt = None
 
+def temporal_sampling(frames, start_idx, end_idx, num_samples):
+	"""
+	Given the start and end frame index, sample num_samples frames between
+	the start and end with equal interval.
+	Args:
+		frames (tensor): a tensor of video frames, dimension is
+			`num video frames` x `channel` x `height` x `width`.
+		start_idx (int): the index of the start frame.
+		end_idx (int): the index of the end frame.
+		num_samples (int): number of frames to sample.
+	Returns:
+		frames (tersor): a tensor of temporal sampled video frames, dimension is
+			`num clip frames` x `channel` x `height` x `width`.
+	"""
+	index = torch.linspace(start_idx, end_idx, num_samples)
+	index = torch.clamp(index, 0, frames.shape[0] - 1).long()
+	frames = torch.index_select(frames, 0, index)
+	return frames
+
+
 def numpy2tensor(x):
 	return torch.from_numpy(x)
 
-def denormalize(data, mean, std):
-	"""Denormalize an image/video tensor with mean and standard deviation.
-
-	Args:
-		input: Image tensor of size : (H W C).
-		mean: Mean for each channel.
-		std: Standard deviations for each channel.
-
-	Return:
-		Denormalised tensor with same size as input : (H W C).
-	"""
-	shape = data.shape
-
-	if isinstance(mean, tuple):
-		mean = np.array(mean, dtype=float)
-		mean = torch.tensor(mean, device=data.device, dtype=data.dtype)
-
-	if isinstance(std, tuple):
-		std = np.array(std, dtype=float)
-		std = torch.tensor(std, device=data.device, dtype=data.dtype)
-
-	if mean.shape:
-		mean = mean[None, :]
-	if std.shape:
-		std = std[None, :]
-
-	out = (data.view(-1, shape[-1]) * std) + mean
-
-	return out.view(shape)
-
-
-def show_processed_image(imgs, save_dir, index=0):
-	"""Plot the transformed images into figure and save to disk.
-	
-	Args:
-		imgs: Image tensor of size : (T H W C).
-		save_dir: The path to save the images.
-		index: The index of current clips.
-	"""
-	os.makedirs(save_dir, exist_ok=True)
-	if not isinstance(imgs[0], list):
-		imgs = [imgs]
-		
-	num_show_clips = 5
-	num_rows = len(imgs)
-	num_cols = num_show_clips
-	fig, axs = plt.subplots(nrows=num_rows, ncols=num_cols, squeeze=False)
-	for row_idx, row in enumerate(imgs):
-		row = row[:num_show_clips]
-		for col_idx, img in enumerate(row):
-			ax = axs[row_idx, col_idx]
-			#img = denormalize(img, mean, std).cpu().numpy()
-			#img = (img * 255).astype(np.uint8)
-			img = img.cpu().numpy().astype(np.uint8)
-			ax.imshow(np.asarray(img))
-			ax.set(xticklabels=[], yticklabels=[], xticks=[], yticks=[])
-
-	plt.tight_layout()
-	filename = osp.join(save_dir, f'clip_transformed_b{index}.png')
-	plt.savefig(filename)
- 
 
 def extract_hog_features(image):
 	hog_features_r = hog(image[:,:,0], orientations=9, pixels_per_cell=(8, 8), cells_per_block=(1, 1), block_norm='L2', feature_vector=False)
@@ -162,7 +117,7 @@ class DecordInit(object):
 					f'sr={self.sr},'
 					f'num_threads={self.num_threads})')
 		return repr_str
-		
+
 
 class Kinetics(torch.utils.data.Dataset):
 	"""Load the Kinetics video files
@@ -177,54 +132,55 @@ class Kinetics(torch.utils.data.Dataset):
 	"""
 
 	def __init__(self,
+				 configs,
 				 annotation_path,
-				 num_class, 
-				 num_samples_per_cls,
-				 objective='mim',
-				 target_video_len=32,
-				 align_transform=None,
-				 aug_transform=None,
+				 transform=None,
 				 temporal_sample=None):
-		self.data = load_annotations(annotation_path, num_class, num_samples_per_cls)
+		self.configs = configs
+		self.data = load_annotations(annotation_path, self.configs.num_class, self.configs.num_samples_per_cls)
 
-		self.align_transform = align_transform
-		self.aug_transform = aug_transform
+		self.transform = transform
 		self.temporal_sample = temporal_sample
-		self.target_video_len = target_video_len
-		self.objective = objective
+		self.target_video_len = self.configs.num_frames
+		self.objective = self.configs.objective
 		self.v_decoder = DecordInit()
 
 		#mask
-		if objective == 'mim':
+		if self.objective == 'mim':
 			self.mask_generator = CubeMaskGenerator(input_size=(8,14,14),min_num_patches=16)
 
 	def __getitem__(self, index):
-		path = self.data[index]['video']
-		try:
-			v_reader = self.v_decoder(path)
-		except:
-			return None, None, None, -1
-		
-		# Sampling video frames
-		total_frames = len(v_reader)
-		start_frame_ind, end_frame_ind = self.temporal_sample(total_frames)
-		if end_frame_ind-start_frame_ind < self.target_video_len:
-			return None, None, None, -1
-		frame_indice = np.linspace(0, end_frame_ind-start_frame_ind-1, 
-								   self.target_video_len, dtype=int)
-		try:
-			video = v_reader.get_batch(frame_indice).asnumpy()
-			del v_reader
-		except:
-			del v_reader
-			return None, None, None, -1
+		while True:
+			try:
+				path = self.data[index]['video']
+				v_reader = self.v_decoder(path)
+				total_frames = len(v_reader)
+				
+				# Sampling video frames
+				start_frame_ind, end_frame_ind = self.temporal_sample(total_frames)
+				assert end_frame_ind-start_frame_ind >= self.target_video_len
+				if self.multi_crop:
+					frame_indice = range(start_frame_ind, end_frame_ind)
+				else:
+					frame_indice = np.linspace(start_frame_ind, end_frame_ind-1, self.target_video_len, dtype=int)
+				video = v_reader.get_batch(frame_indice).asnumpy()
+				del v_reader
+				break
+			except Exception as e:
+				print(e)
+				index = random.randint(0, len(self.data) - 1)
 		
 		# Video align transform: T C H W
 		with torch.no_grad():
 			video = torch.from_numpy(video).permute(0,3,1,2)
-			if self.align_transform is not None:
-				self.align_transform.randomize_parameters()
-				video = self.align_transform(video)
+			if self.transform is not None:
+				if hasattr(self.transform, 'randomize_parameters'):
+					self.transform.randomize_parameters()
+					video = self.transform(video)
+				else:
+					video = rearrange(video, 't c h w -> (t c) h w')
+					video = self.transform(video)
+					video = rearrange(video, '(t c) h w -> t c h w', t=self.target_video_len)
 
 		# Label (depends)
 		if self.objective == 'mim':
@@ -233,8 +189,6 @@ class Kinetics(torch.utils.data.Dataset):
 		else:
 			label = self.data[index]['label']
 		
-		#if self.aug_transform is not None:
-		#	video = self.aug_transform(video)
 		if self.objective == 'mim':
 			return video, numpy2tensor(label), numpy2tensor(mask), cube_marker
 		else:
@@ -248,9 +202,42 @@ if __name__ == '__main__':
 	# Unit test for loading video and computing time cost
 	import data_transform as T
 	import time
-	path = './test.mp4'
+	path = './YABnJL_bDzw.mp4'
+	color_jitter = 0.4
+	auto_augment = 'rand-m9-mstd0.5-inc1'
+	scale = None
+	mean, std = (0.45, 0.45, 0.45), (0.225, 0.225, 0.225)
+	transform = T.create_video_transform(
+		input_size=224,
+		is_training=True,
+		scale=scale,
+		hflip=0.5,
+		color_jitter=color_jitter,
+		auto_augment=auto_augment,
+		interpolation='bicubic',
+		mean=mean,
+		std=std)
+	
+	v_decoder = DecordInit()
+	v_reader = v_decoder(path)
+	total_frames = len(v_reader)
+	target_video_len = 16
+	# Sampling video frames
+	temporal_sample = T.TemporalRandomCrop(target_video_len*16)
+	start_frame_ind, end_frame_ind = temporal_sample(total_frames)
+	frame_indice = np.linspace(start_frame_ind, end_frame_ind-1, target_video_len, dtype=int)
+	video = v_reader.get_batch(frame_indice).asnumpy()
+	del v_reader
+	
+	# Video align transform: T C H W
+	with torch.no_grad():
+		video = torch.from_numpy(video).permute(0,3,1,2)
+		if transform is not None:
+			video = transform(video)
+	
+	show_processed_image(video.permute(0,2,3,1), save_dir='./', mean=mean, std=std)
+	'''
 	mask_generator = CubeMaskGenerator(input_size=(8,14,14),min_num_patches=16)
-
 	counts = 1
 	while True:
 		if counts > 100:
@@ -282,6 +269,7 @@ if __name__ == '__main__':
 		counts += 1
 		print(f'{(time.perf_counter()-start_time):.3f}')
 	print('finish')
+	'''
 	#_, hog_image = hog(video.permute(0,2,3,1).numpy()[0][:,:,2], orientations=9, pixels_per_cell=(8, 8), cells_per_block=(1, 1), block_norm='L2', feature_vector=False, visualize=True)
 	#from skimage import io
 	#io.imsave('./test_img_hog.jpg',hog_image)

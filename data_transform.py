@@ -1,18 +1,36 @@
 from collections.abc import Sequence
 import random
+import math
 
+from einops import rearrange
 import numpy as np
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 
+DEFAULT_CROP_PCT = 0.875
+IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
+_torch_interpolation_to_str = {
+			InterpolationMode.NEAREST: 'nearest',
+			InterpolationMode.BILINEAR: 'bilinear',
+			InterpolationMode.BICUBIC: 'bicubic',
+			InterpolationMode.BOX: 'box',
+			InterpolationMode.HAMMING: 'hamming',
+			InterpolationMode.LANCZOS: 'lanczos',
+		}
+_str_to_torch_interpolation = {b: a for a, b in _torch_interpolation_to_str.items()}
+
+def str_to_interp_mode(mode_str):
+	return _str_to_torch_interpolation[mode_str]
 
 #  ------------------------------------------------------------
 #  ----------------------  Common  ----------------------------
 #  ------------------------------------------------------------
 class Compose(object):
 	"""Composes several transforms together.
-	
+
 	Args:
 		transforms (list of transform objects): list of data transforms to compose.
 	"""
@@ -27,12 +45,13 @@ class Compose(object):
 
 	def randomize_parameters(self):
 		for t in self.transforms:
-			t.randomize_parameters()
+			if hasattr(t, 'randomize_parameters'):
+				t.randomize_parameters()
 
 
 class ToTensor(object):
 	"""Convert a tensor to torch.FloatTensor in the range [0.0, 1.0].
-	
+
 	Args:
 		norm_value (int): the max value of the input image tensor, default to 255.
 	"""
@@ -46,14 +65,14 @@ class ToTensor(object):
 
 	def randomize_parameters(self):
 		pass
-		
-		
+	
+	
 #  ------------------------------------------------------------
 #  -------------------  Transformation  -----------------------
 #  ------------------------------------------------------------
 class RandomCrop(object):
 	"""Random crop a fixed size region in a given image.
-	
+
 	Args:
 		size (int, Tuple[int]): Desired output size (out_h, out_w) of the crop
 	"""
@@ -70,12 +89,12 @@ class RandomCrop(object):
 	def __call__(self, imgs):
 		# Crop size
 		size = self.size
-		
+	
 		# Location
 		img_height, img_width  = imgs.size(2), imgs.size(3)
 		y_offset = int(self.y_jitter * (img_height - size))
 		x_offset = int(self.x_jitter * (img_width - size))
-		
+	
 		imgs = imgs[..., y_offset : y_offset + size, x_offset : x_offset + size]
 		return imgs
 
@@ -83,7 +102,7 @@ class RandomCrop(object):
 		repr_str = (f'{self.__class__.__name__}('
 					f'size={self.size})')
 		return repr_str
-	
+
 	def randomize_parameters(self):
 		self.x_jitter = random.random()
 		self.y_jitter = random.random()
@@ -112,7 +131,7 @@ class Resize(object):
 		repr_str = (f'{self.__class__.__name__}('
 					f'size={self.size})')
 		return repr_str
-	
+
 	def randomize_parameters(self):
 		if self.scale_range[0] == -1:
 			self._resize = transforms.Resize(self.scale_range[1])
@@ -135,13 +154,13 @@ class RandomResizedCrop:
 	def __init__(self,
 				 size,
 				 interpolation=3,
-				 area_range=(0.08, 1.0),
-				 aspect_ratio_range=(3 / 4, 4 / 3)):
+				 scale=(0.08, 1.0),
+				 ratio=(3 / 4, 4 / 3)):
 		self.size = size
-		self.area_range = area_range
-		self.aspect_ratio_range = aspect_ratio_range
+		self.area_range = scale
+		self.aspect_ratio_range = ratio
 		self.interpolation = interpolation
-		
+	
 	def __call__(self, imgs):
 		"""Performs the RandomResizeCrop augmentation.
 
@@ -151,7 +170,7 @@ class RandomResizedCrop:
 		"""
 		# version one- frame diverse
 		#imgs = self._crop_imgs(imgs)
-		
+	
 		# version two- frame consistent
 		img_width = imgs.shape[-1]
 		img_height = imgs.shape[-2]
@@ -164,7 +183,7 @@ class RandomResizedCrop:
 		# location
 		left = self.tl_x * (img_width - width)
 		top = self.tl_y * (img_height - height)
-		
+	
 		imgs = transforms.functional.resized_crop(
 			imgs, int(top), int(left), int(height), int(width), self.size, interpolation=self.interpolation)
 
@@ -176,7 +195,7 @@ class RandomResizedCrop:
 					f'aspect_ratio_range={self.aspect_ratio_range}, '
 					f'size={self.size})')
 		return repr_str
-	
+
 	def randomize_parameters(self):
 		self.scale = random.uniform(self.area_range[0], self.area_range[1])
 		self.ratio = random.uniform(self.aspect_ratio_range[0], self.aspect_ratio_range[1])
@@ -219,9 +238,69 @@ class Flip(object):
 			self._flip = transforms.RandomHorizontalFlip(p=0)
 
 
+class RandomGrayscale(object):
+	"""Flip the input images with a probability.
+
+	Args:
+		flip_ratio (float): Probability of implementing flip. Default: 0.5.
+	"""
+
+	def __init__(self,
+				 p=0.1):
+		self.p = p
+
+	def __call__(self, imgs):
+		imgs = self._grayscale(imgs)
+		return imgs
+
+	def __repr__(self):
+		repr_str = (
+			f'{self.__class__.__name__}('
+			f'p={self.p})')
+		return repr_str
+
+	def randomize_parameters(self):
+		p = random.random()
+		if p > self.p:
+			self._grayscale = transforms.RandomGrayscale(p=0)
+		else:
+			self._grayscale = transforms.RandomGrayscale(p=1)
+
+
+class RandomApply(object):
+	"""Flip the input images with a probability.
+
+	Args:
+		flip_ratio (float): Probability of implementing flip. Default: 0.5.
+	"""
+
+	def __init__(self,
+				 transform,
+				 p=0.5):
+		self.p = p
+		self.transform = transform
+
+	def __call__(self, imgs):
+		imgs = self._random_apply(imgs)
+		return imgs
+
+	def __repr__(self):
+		repr_str = (
+			f'{self.__class__.__name__}('
+			f'p={self.p})')
+		return repr_str
+
+	def randomize_parameters(self):
+		p = random.random()
+		if p > self.p:
+			self._random_apply = transforms.RandomApply(self.transform, p=0)
+		else:
+			self._random_apply = transforms.RandomApply(self.transform, p=1)
+
+
 class Normalize(object):
 	"""Normalize the images with the given mean and std value.
-	
+
 	Args:
 		mean (Sequence[float]): Mean values of different channels.
 		std (Sequence[float]): Std values of different channels.
@@ -236,11 +315,11 @@ class Normalize(object):
 		if not isinstance(std, Sequence):
 			raise TypeError(
 				f'Std must be list, tuple or np.ndarray, but got {type(std)}')
-				
+			
 		self._normalize = transforms.Normalize(mean, std)
 		self.mean = mean
 		self.std = std
-	
+
 	#@profile
 	def __call__(self, imgs):
 		imgs = self._normalize(imgs)
@@ -258,9 +337,9 @@ class Normalize(object):
 
 class ColorJitter(object):
 	"""Randomly distort the brightness, contrast, saturation and hue of images.
-	
+
 	Note: The input images should be in RGB channel order.
-	
+
 	Args:
 		brightness (float): the std values of brightness distortion.
 		contrast (float): the std values of contrast distortion.
@@ -279,7 +358,11 @@ class ColorJitter(object):
 		self.hue = hue
 
 	def __call__(self, imgs):
-		imgs = self._color_jit(imgs)
+		print(imgs.shape)
+		if imgs.ndim == 3:
+			imgs = rearrange(imgs, '(t c) h w -> t c h w', c=3)
+			imgs = self._color_jit(imgs)
+			imgs = rearrange(imgs, 't c h w -> (t c) h w')
 		return imgs
 
 	def __repr__(self):
@@ -289,13 +372,13 @@ class ColorJitter(object):
 					f'saturation={self.saturation}, '
 					f'hue={self.hue})')
 		return repr_str
-	
+
 	def randomize_parameters(self):
 		brightness = random.uniform(max(0,1-self.brightness), 1+self.brightness)
 		contrast = random.uniform(max(0,1-self.contrast), 1+self.contrast)
 		saturation = random.uniform(max(0,1-self.saturation), 1+self.saturation)
 		hue = random.uniform(-self.hue, self.hue)
-		
+	
 		self._color_jit = transforms.ColorJitter(
 			brightness=(brightness,brightness),
 			contrast=(contrast,contrast),
@@ -349,7 +432,7 @@ class ThreeCrop(object):
 		if size > img_height or size > img_width:
 			msg = "Requested crop size {} is bigger than input size {}"
 			raise ValueError(msg.format(size, (img_height, img_width)))
-		
+	
 		# Location
 		crops = []
 		left_y_offset = (img_height - size) // 2
@@ -358,21 +441,21 @@ class ThreeCrop(object):
 					left_y_offset : left_y_offset + size,
 					left_x_offset : left_x_offset + size]
 		crops.append(left)
-		
+	
 		right_y_offset = (img_height - size) // 2
 		right_x_offset = img_width - size
 		right = imgs[...,
 					 right_y_offset : right_y_offset + size,
 					 right_x_offset : right_x_offset + size]
 		crops.append(right)
-		
+	
 		center_y_offset = (img_height - size) // 2
 		center_x_offset = (img_width - size) // 2
 		center = imgs[...,
 					  center_y_offset : center_y_offset + size,
 					  center_x_offset : center_x_offset + size]
 		crops.append(center)
-		
+	
 		# (N_Crops T C H W)
 		imgs = torch.stack(crops)
 		return imgs
@@ -381,10 +464,10 @@ class ThreeCrop(object):
 		repr_str = (f'{self.__class__.__name__}('
 					f'size={self.size})')
 		return repr_str
-	
+
 	def randomize_parameters(self):
 		pass
-	
+
 
 #  ------------------------------------------------------------
 #  ---------------------  Sampling  ---------------------------
@@ -404,3 +487,140 @@ class TemporalRandomCrop(object):
 		begin_index = random.randint(0, rand_end)
 		end_index = min(begin_index + self.size, total_frames)
 		return begin_index, end_index
+
+
+#  ------------------------------------------------------------
+#  ---------------------  AdvancedAugment  --------------------
+#  ------------------------------------------------------------
+def transforms_train(img_size=224,
+					 scale=None,
+					 ratio=None,
+					 hflip=0.5,
+					 color_jitter=0.4,
+					 auto_augment=None,
+					 interpolation='random',
+					 mean=IMAGENET_DEFAULT_MEAN,
+					 std=IMAGENET_DEFAULT_STD):
+	"""
+	If separate==True, the transforms are returned as a tuple of 3 separate transforms
+	for use in a mixing dataset that passes
+	 * all data through the first (primary) transform, called the 'clean' data
+	 * a portion of the data through the secondary transform
+	 * normalizes and converts the branches above with the third, final transform
+	"""
+	scale = tuple(scale or (0.08, 1.0))  # default imagenet scale range
+	ratio = tuple(ratio or (3./4., 4./3.))  # default imagenet ratio range
+	primary_tfl = [
+		transforms.RandomResizedCrop(img_size, scale=scale, ratio=ratio, interpolation=str_to_interp_mode(interpolation))]
+	if hflip > 0.:
+		primary_tfl += [transforms.RandomHorizontalFlip(p=hflip)]
+
+	secondary_tfl = []
+	if auto_augment:
+		'''
+		assert isinstance(auto_augment, str)
+		if isinstance(img_size, (tuple, list)):
+			img_size_min = min(img_size)
+		else:
+			img_size_min = img_size
+		aa_params = dict(
+			translate_const=int(img_size_min * 0.45),
+			img_mean=tuple([min(255, round(255 * x)) for x in mean]),
+		)
+		if interpolation and interpolation != 'random':
+			aa_params['interpolation'] = str_to_interp_mode(interpolation)
+		if auto_augment.startswith('rand'):
+			secondary_tfl += [rand_augment_transform(auto_augment, aa_params)]
+		'''
+		secondary_tfl += [transforms.autoaugment.RandAugment()]
+	elif color_jitter is not None:
+		# color jitter is enabled when not using AA
+		if isinstance(color_jitter, (list, tuple)):
+			# color jitter should be a 3-tuple/list if spec brightness/contrast/saturation
+			# or 4 if also augmenting hue
+			assert len(color_jitter) in (3, 4)
+		else:
+			# if it's a scalar, duplicate for brightness, contrast, and saturation, no hue
+			color_jitter = (float(color_jitter),) * 3
+		secondary_tfl += [transforms.ColorJitter(*color_jitter)]
+
+	final_tfl = []
+	final_tfl += [
+		ToTensor(),
+		transforms.Normalize(
+			mean=torch.tensor(mean),
+			std=torch.tensor(std))
+	]
+
+	#return transforms.Compose(primary_tfl + secondary_tfl + final_tfl)
+	return Compose(primary_tfl + secondary_tfl + final_tfl)
+
+
+def transforms_eval(img_size=224,
+					crop_pct=None,
+					interpolation='bilinear',
+					mean=IMAGENET_DEFAULT_MEAN,
+					std=IMAGENET_DEFAULT_STD):
+	crop_pct = crop_pct or DEFAULT_CROP_PCT
+
+	if isinstance(img_size, (tuple, list)):
+		assert len(img_size) == 2
+		if img_size[-1] == img_size[-2]:
+			# fall-back to older behaviour so Resize scales to shortest edge if target is square
+			scale_size = int(math.floor(img_size[0] / crop_pct))
+		else:
+			scale_size = tuple([int(x / crop_pct) for x in img_size])
+	else:
+		scale_size = int(math.floor(img_size / crop_pct))
+
+	tfl = [
+		transforms.Resize(scale_size, interpolation=str_to_interp_mode(interpolation)),
+		transforms.CenterCrop(img_size),
+	]
+	tfl += [
+		ToTensor(),
+		transforms.Normalize(
+				 mean=torch.tensor(mean),
+				 std=torch.tensor(std))
+	]
+
+	return Compose(tfl)
+
+
+def create_video_transform(input_size=224,
+						   is_training=False,
+						   scale=None,
+						   ratio=None,
+						   hflip=0.5,
+						   color_jitter=0.4,
+						   auto_augment=None,
+						   interpolation='bilinear',
+						   mean=IMAGENET_DEFAULT_MEAN,
+						   std=IMAGENET_DEFAULT_STD,
+						   crop_pct=None):
+
+	if isinstance(input_size, (tuple, list)):
+		img_size = input_size[-2:]
+	else:
+		img_size = input_size
+
+	if is_training:
+		transform = transforms_train(
+			img_size,
+			scale=scale,
+			ratio=ratio,
+			hflip=hflip,
+			color_jitter=color_jitter,
+			auto_augment=auto_augment,
+			interpolation=interpolation,
+			mean=mean,
+			std=std)
+	else:
+		transform = transforms_eval(
+			img_size,
+			interpolation=interpolation,
+			mean=mean,
+			std=std,
+			crop_pct=crop_pct)
+
+	return transform

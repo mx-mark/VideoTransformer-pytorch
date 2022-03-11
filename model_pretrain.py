@@ -16,7 +16,7 @@ from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 import torch
 import torch.utils.data as data
 
-from data_trainer import KineticsDataModule, DataAugmentation
+from data_trainer import KineticsDataModule
 from model_trainer import VideoTransformer
 import data_transform as T
 from utils import print_on_rank_zero
@@ -24,18 +24,10 @@ from utils import print_on_rank_zero
 
 def parse_args():
 	parser = argparse.ArgumentParser(description='lr receiver')
-	parser.add_argument(
-		'-lr', type=float, required=True,
-		help='the initial learning rate')
+	# Common
 	parser.add_argument(
 		'-epoch', type=int, required=True,
 		help='the max epochs of training')
-	parser.add_argument(
-		'-gpus', nargs='+', type=int, default=-1,
-		help='the avaiable gpus in this experiment')
-	parser.add_argument(
-		'-nccl_ifname', type=str, default='lan2',
-		help='the nccl socket ifname can be found using ifconfig command')
 	parser.add_argument(
 		'-batch_size', type=int, required=True,
 		help='the batch size of data inputs')
@@ -43,11 +35,35 @@ def parse_args():
 		'-num_workers', type=int, default=4,
 		help='the num workers of loading data')
 	parser.add_argument(
+		'-resume', default=False, action='store_true')
+	parser.add_argument(
+		'-resume_from_checkpoint', type=str, default=None,
+		help='the pretrain params from specific path')
+	parser.add_argument(
 		'-log_interval', type=int, default=30,
 		help='the intervals of logging')
 	parser.add_argument(
 		'-save_ckpt_freq', type=int, default=20,
 		help='the intervals of saving model')
+	parser.add_argument(
+		'-objective', type=str, default='mim',
+		help='the learning objective from [mim, dino, supervised]')
+	parser.add_argument(
+		'-eval_metrics', type=str, default='finetune',
+		help='the eval metrics choosen from [linear_prob, finetune]')
+
+	# Environment
+	parser.add_argument(
+		'-gpus', nargs='+', type=int, default=-1,
+		help='the avaiable gpus in this experiment')
+	parser.add_argument(
+		'-nccl_ifname', type=str, default='lan2',
+		help='the nccl socket ifname can be found using ifconfig command')
+	parser.add_argument(
+		'-root_dir', type=str, required=True,
+		help='the path to root dir for work space')
+
+	# Data
 	parser.add_argument(
 		'-num_class', type=int, required=True,
 		help='the num class of dataset used')
@@ -55,28 +71,8 @@ def parse_args():
 		'-num_samples_per_cls', type=int, default=10000,
 		help='the num samples of per class')
 	parser.add_argument(
-		'-arch', type=str, default='timesformer',
-		help='the choosen model arch from [timesformer, vivit]')
-	parser.add_argument(
-		'-attention_type', type=str, default='divided_space_time',
-		help='the choosen attention type using in model')
-	parser.add_argument(
-		'-pretrain', type=str, default='vit',
-		help='the pretrain params from [mae, vit]')
-	parser.add_argument(
-		'-optim_type', type=str, default='adamw',
-		help='the optimizer using in the training')
-	parser.add_argument(
-		'-lr_schedule', type=str, default='cosine',
-		help='the lr schedule using in the training')
-	parser.add_argument(
-		'-objective', type=str, default='mim',
-		help='the learning objective from [mim, supervised]')
-	parser.add_argument(
-		'-resume', default=False, action='store_true')
-	parser.add_argument(
-		'-resume_from_checkpoint', type=str, default=None,
-		help='the pretrain params from specific path')
+		'-img_size', type=int, default=224,
+		help='the size of processed image')
 	parser.add_argument(
 		'-num_frames', type=int, required=True,
 		help='the mumber of frame sampling')
@@ -84,8 +80,8 @@ def parse_args():
 		'-frame_interval', type=int, required=True,
 		help='the intervals of frame sampling')
 	parser.add_argument(
-		'-seed', type=int, default=0,
-		help='the seed of exp')
+		'-data_statics', type=str, default='kinetics',
+		help='choose data statics from [imagenet, kinetics]')
 	parser.add_argument(
 		'-train_data_path', type=str, required=True,
 		help='the path to train set')
@@ -96,8 +92,65 @@ def parse_args():
 		'-test_data_path', type=str, default=None,
 		help='the path to test set')
 	parser.add_argument(
-		'-root_dir', type=str, required=True,
-		help='the path to root dir for work space')
+		'-multi_crop', type=bool, default=False, 
+		help="""Whether or not to use multi crop.""")
+	parser.add_argument(
+		'-mixup', type=bool, default=False, 
+		help="""Whether or not to use multi crop.""")
+	parser.add_argument(
+		'-auto_augment', type=str, default=None,
+		help='the used Autoaugment policy')
+		
+	# Model
+	parser.add_argument(
+		'-arch', type=str, default='timesformer',
+		help='the choosen model arch from [timesformer, vivit]')
+	parser.add_argument(
+		'-attention_type', type=str, default='divided_space_time',
+		help='the choosen attention type using in model')
+	parser.add_argument(
+		'-pretrain', type=str, default='vit',
+		help='the pretrain params from [mae, vit]')
+
+	# Training/Optimization parameters
+	parser.add_argument(
+		'-seed', type=int, default=0,
+		help='the seed of exp')
+	parser.add_argument(
+		'-optim_type', type=str, default='adamw',
+		help='the optimizer using in the training')
+	parser.add_argument(
+		'-lr_schedule', type=str, default='cosine',
+		help='the lr schedule using in the training')
+	parser.add_argument(
+		'-lr', type=float, required=True,
+		help='the initial learning rate')
+	parser.add_argument(
+		'-layer_decay', type=float, default=0.75,
+		help='the value of layer_decay')
+	parser.add_argument(
+		'--min_lr', type=float, default=1e-6, 
+		help="""Target LR at the end of optimization. We use a cosine LR schedule with linear warmup.""")
+	parser.add_argument(
+		'-use_fp16', type=bool, default=True, 
+		help="""Whether or not to use half precision for training. Improves training time and memory requirements,
+		but can provoke instability and slight decay of performance. We recommend disabling
+		mixed precision if the loss is unstable, if reducing the patch size or if training with bigger ViTs.""")
+	parser.add_argument(
+		'-weight_decay', type=float, default=0.05, 
+		help="""Initial value of the weight decay. With ViT, a smaller value at the beginning of training works well.""")
+	parser.add_argument(
+		'-weight_decay_end', type=float, default=0.05, 
+		help="""Final value of the weight decay. We use a cosine schedule for WD and using a larger decay by
+		the end of training improves performance for ViTs.""")
+	parser.add_argument(
+		'-clip_grad', type=float, default=0, 
+		help="""Maximal parameter gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
+		help optimization for larger ViT architectures. 0 for disabling.""")
+	parser.add_argument(
+		"-warmup_epochs", default=5, type=int,
+		help="Number of epochs for the linear learning-rate warm up.")
+
 	args = parser.parse_args()
 	
 	return args
@@ -107,176 +160,65 @@ def single_run():
 	#os.environ['NCCL_SOCKET_IFNAME'] = args.nccl_ifname #'lan1'
 	warnings.filterwarnings('ignore')
 	
-	# Experiment Settings
-	MAX_EPOCHS = args.epoch
-	BATCH_SIZE = args.batch_size
-	NUM_WORKERS = args.num_workers
-	ARCH = args.arch #'mvit'#'timesformer'
-	SEED = args.seed
-	N_VIDEO_FRAMES = args.num_frames
-	IMG_SIZE = 224
-	N_FRAME_INTERVAL = args.frame_interval
-	
-	ROOT_DIR = args.root_dir
-	train_ann_path = args.train_data_path
-	val_ann_path = args.val_data_path
-	test_ann_path = args.test_data_path
-	if 'mae' in args.pretrain:
-		ckpt_pth = 'pretrain_model/pretrain_mae_vit_base_mask_0.75_400e.pth'
-		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
-	else:
-		ckpt_pth = 'pretrain_model/vit_base_patch16_224.pth'
-		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
-	
+	# linear learning rate scale
 	if isinstance(args.gpus, int):
 		num_gpus = torch.cuda.device_count()
 	else:
 		num_gpus = len(args.gpus)
-	if args.objective == 'mim':
-		effective_batch_size = BATCH_SIZE * num_gpus
-		args.lr = args.lr * effective_batch_size / 256
-	elif args.objective == 'supervised':
-		effective_batch_size = BATCH_SIZE * num_gpus
-		args.lr = args.lr * effective_batch_size / 64
+	effective_batch_size = args.batch_size * num_gpus
+	args.lr = args.lr * effective_batch_size / 256
 
+	# Experiment Settings
+	ROOT_DIR = args.root_dir
+	if 'mae' in args.pretrain:
+		ckpt_pth = 'pretrain_model/pretrain_mae_vit_base_mask_0.75_400e.pth'
+		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
+	elif 'maskfeat' in args.pretrain:
+		ckpt_pth = 'pretrain_model/maskfeat.pth'
+		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
+	else:
+		ckpt_pth = 'pretrain_model/vit_base_patch16_224.pth'
+		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
 
-	# TimeSformer-B settings	
-	model_kwargs = {
-		'pretrained':pretrain_pth,
-		'num_frames':N_VIDEO_FRAMES,
-		'img_size':IMG_SIZE,
-		'patch_size':16,
-		'embed_dims':768,
-		'in_channels':3,
-		'dropout_ratio':0.0,
-		'attention_type':args.attention_type,
-		#common
-		'arch':ARCH,
-		'n_crops':3,
-		'lr':args.lr,
-		'num_classes':args.num_class,
-		'log_interval':args.log_interval,
-		'optim_type':args.optim_type,
-		'lr_schedule':args.lr_schedule,
-		}
-		
-	exp_tag = (f'arch_{ARCH}_lr_{args.lr}_'
-			   f'optim_{args.optim_type}_'
-			   f'lr_schedule_{args.lr_schedule}_'
-			   f'objective_{args.objective}_'
-			   f'pretrain_{args.pretrain}_seed_{SEED}_'
-			   f'gpus_{num_gpus}_'
-			   f'bs_{BATCH_SIZE}_nw_{NUM_WORKERS}_'
-			   f'frame_interval_{N_FRAME_INTERVAL}')
+	exp_tag = (f'objective_{args.objective}_arch_{args.arch}_lr_{args.lr}_'
+			   f'optim_{args.optim_type}_lr_schedule_{args.lr_schedule}_'
+			   f'fp16_{args.use_fp16}_weight_decay_{args.weight_decay}_'
+			   f'weight_decay_end_{args.weight_decay_end}_warmup_epochs_{args.warmup_epochs}_'
+			   f'pretrain_{args.pretrain}_seed_{args.seed}_eval_metrics_{args.eval_metrics}_'
+			   f'img_size_{args.img_size}_num_frames_{args.num_frames}_'
+			   f'frame_interval_{args.frame_interval}_mixup_{args.mixup}_'
+			   f'multi_crop_{args.multi_crop}_auto_augment_{args.auto_augment}_')
 	ckpt_dir = os.path.join(ROOT_DIR, f'results/{exp_tag}/ckpt')
 	log_dir = os.path.join(ROOT_DIR, f'results/{exp_tag}/log')
 	os.makedirs(ckpt_dir, exist_ok=True)
 	os.makedirs(log_dir, exist_ok=True)
 
 	# Data
-	mean, std = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
-	mean, std = (0.45, 0.45, 0.45), (0.225, 0.225, 0.225)
-	# train
-	# MaskFeat RPC
-	if args.objective == 'mim':
-		mean = (0.485, 0.456, 0.406) #(0.45, 0.45, 0.45)
-		std = (0.229, 0.224, 0.225) #(0.225, 0.225, 0.225)
-		train_align_transform = T.Compose([
-			#T.Resize(scale_range=(-1, 224)),
-			#T.Resize(scale_range=(224, 224)),
-			#T.RandomCrop(size=IMG_SIZE),
-			T.RandomResizedCrop(size=(224, 224), area_range=(0.5, 1.0), interpolation=3), #InterpolationMode.BICUBIC
-			T.Flip(),
-			])
-		#train_aug_transform = T.Compose([T.ToTensor(),T.Normalize(mean,std)])
-		train_aug_transform = DataAugmentation(norm_transform=K.Normalize(mean, std), to_tensor=T.ToTensor())
-	elif args.objective == 'supervised':
-		# For Supervised Training
-		train_align_transform = T.Compose([
-			T.Resize(scale_range=(256, 320)),
-			T.RandomCrop(size=IMG_SIZE),
-			T.ToTensor(),
-			])
-		train_aug_transform = K.VideoSequential(
-			K.RandomHorizontalFlip(p=0.5),
-			data_format="BTCHW",
-			same_on_frame=True,
-			)
-		train_aug_transform = DataAugmentation(norm_transform=K.Normalize(mean, std), aug_transform=train_aug_transform)
-	else:
-		raise TypeError(f'not support the learning objective {args.objective}, only in [mim, supervised]')
-
-	train_temporal_sample = T.TemporalRandomCrop(N_VIDEO_FRAMES*N_FRAME_INTERVAL)
+	do_eval = True if args.val_data_path is not None else False
+	do_test = True if args.test_data_path is not None else False
 	
-	# val
-	if val_ann_path is not None:
-		val_align_transform = T.Compose([
-			T.Resize(scale_range=(-1, 256)),
-			T.CenterCrop(size=IMG_SIZE),
-			T.ToTensor(),
-			])
-		val_aug_transform = DataAugmentation(norm_transform=K.Normalize(mean, std))
-		val_temporal_sample = T.TemporalRandomCrop(N_VIDEO_FRAMES*N_FRAME_INTERVAL)
-		do_eval = True
-	else:
-		val_align_transform = None
-		val_aug_transform = None
-		val_temporal_sample = None
-		do_eval = False
-		
-	# test
-	if test_ann_path is not None:
-		test_align_transform = T.Compose([
-			T.Resize(scale_range=(-1, 224)),
-			T.ThreeCrop(size=IMG_SIZE),
-			T.ToTensor(),
-			])
-		test_aug_transform = DataAugmentation(norm_transform=K.Normalize(mean, std))
-		test_temporal_sample = T.TemporalRandomCrop(N_VIDEO_FRAMES*N_FRAME_INTERVAL)
-		do_test = True
-	else:
-		test_align_transform = None
-		test_aug_transform = None
-		test_temporal_sample = None
-		do_test = False
+	data_module = KineticsDataModule(configs=args,
+									 train_ann_path=args.train_data_path,
+									 val_ann_path=args.val_data_path,
+									 test_ann_path=args.test_data_path)
 	
-	data_module = KineticsDataModule(
-		train_ann_path=train_ann_path,
-		train_align_transform=train_align_transform,
-		train_aug_transform=train_aug_transform,
-		train_temporal_sample=train_temporal_sample,
-		val_ann_path=val_ann_path,
-		val_align_transform=val_align_transform,
-		val_aug_transform=val_aug_transform,
-		val_temporal_sample=val_temporal_sample,
-		test_ann_path=test_ann_path,
-		test_align_transform=test_align_transform,
-		test_aug_transform=test_aug_transform,
-		test_temporal_sample=test_temporal_sample,
-		num_class=args.num_class, 
-		num_samples_per_cls=args.num_samples_per_cls,
-		target_video_len=N_VIDEO_FRAMES,
-		batch_size=BATCH_SIZE,
-		num_workers=NUM_WORKERS,
-		objective=args.objective)
-	
-	# Logger
-	#comet_logger = CometLogger(
-	#	save_dir=log_dir,
-	#	project_name="Pretrain on K600",
-	#	experiment_name=exp_tag,
-	#	offline=True)
-	# Resume from the last checkpoint(wait)
+	# Resume from the last checkpoint
 	if args.resume and not args.resume_from_checkpoint:
 		args.resume_from_checkpoint = os.path.join(ckpt_dir, 'last_checkpoint.pth')
 
 	# Trainer
+	if args.arch == 'mvit' and args.objective == 'supervised':
+		find_unused_parameters = True
+	else:
+		find_unused_parameters = False
+
 	trainer = pl.Trainer(
 		gpus=args.gpus, # devices=-1
 		accelerator="ddp", # accelerator="gpu",strategy='ddp'
+		precision=16,
 		#profiler="advanced",
-		plugins=[DDPPlugin(find_unused_parameters=False),],
-		max_epochs=MAX_EPOCHS,
+		plugins=[DDPPlugin(find_unused_parameters=find_unused_parameters),],
+		max_epochs=args.epoch,
 		callbacks=[
 			LearningRateMonitor(logging_interval='step'),
 		],
@@ -288,24 +230,23 @@ def single_run():
 		flush_logs_every_n_steps=args.log_interval*5)
 		
 	# To be reproducable
-	torch.random.manual_seed(SEED)
-	np.random.seed(SEED)
-	random.seed(SEED)
-	pl.seed_everything(SEED)#, workers=True)
+	torch.random.manual_seed(args.seed)
+	np.random.seed(args.seed)
+	random.seed(args.seed)
+	pl.seed_everything(args.seed, workers=True)
 	
 	# Model
-	model = VideoTransformer(**model_kwargs, 
+	model = VideoTransformer(configs=args, 
 							 trainer=trainer,
 							 ckpt_dir=ckpt_dir,
 							 do_eval=do_eval,
 							 do_test=do_test,
-							 objective=args.objective,
-							 save_ckpt_freq=args.save_ckpt_freq)
+							 pretrained=pretrain_pth)
 	print_on_rank_zero(args)
 	timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
 	print_on_rank_zero(f'{timestamp} - INFO - Start running,')
 	trainer.fit(model, data_module)
-	trainer.test(model, data_module)
+	#trainer.test(model, data_module)
 	
 if __name__ == '__main__':
 	single_run()

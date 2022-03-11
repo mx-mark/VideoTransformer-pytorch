@@ -17,9 +17,13 @@ def show_state_dict(state_dict):
 def replace_state_dict(state_dict):
 	for old_key in list(state_dict.keys()):
 		if old_key.startswith('model'):
-			new_key = old_key[6:]
+			new_key = old_key[6:] # skip 'model.'
+			if 'in_proj' in new_key:
+				new_key = new_key.replace('in_proj_', 'qkv.') #in_proj_weight -> qkv.weight
+			elif 'out_proj' in new_key:
+				new_key = new_key.replace('out_proj', 'proj')
 			state_dict[new_key] = state_dict.pop(old_key)
-		else:
+		else: # cls_head
 			new_key = old_key[9:]
 			state_dict[new_key] = state_dict.pop(old_key)
 
@@ -139,6 +143,11 @@ def init_from_vit_pretrain_(module,
 										  'transformer_layers.0.layers')
 			else:
 				new_key = old_key
+			
+			if 'in_proj' in new_key:
+				new_key = new_key.replace('in_proj_', 'qkv.') #in_proj_weight -> qkv.weight
+			elif 'out_proj' in new_key:
+				new_key = new_key.replace('out_proj', 'proj')
 
 			if 'norms' in new_key:
 				new_key = new_key.replace('norms.0', 'attentions.0.norm')
@@ -231,10 +240,10 @@ def init_from_mae_pretrain_(module,
 				new_key = new_key.replace('norm1', 'attentions.0.norm')
 				new_key = new_key.replace('norm2', 'ffns.0.norm')
 			elif 'attn' in new_key:
-				new_key = new_key.replace('attn.qkv.weight',
-										  'attentions.0.attn.in_proj_weight')
-				new_key = new_key.replace('attn.proj',
-										  'attentions.0.attn.out_proj')
+				#new_key = new_key.replace('attn.qkv.weight',
+				#						  'attentions.0.attn.in_proj_weight')
+				#new_key = new_key.replace('attn.proj',
+				#						  'attentions.0.attn.out_proj')
 				if 'q_bias' in new_key:
 					pattern = re.compile(r'(?<=blocks.)\d+')
 					matchObj = pattern.findall(old_key)
@@ -245,7 +254,8 @@ def init_from_mae_pretrain_(module,
 										torch.zeros_like(q_bias, requires_grad=False),
 										v_bias))
 					new_key = new_key.replace('attn.q_bias',
-										      'attentions.0.attn.in_proj_bias')
+											  #'attentions.0.attn.in_proj_bias')
+											  'attentions.0.attn.qkv.bias')
 					state_dict.pop(f'encoder.blocks.{block_id}.attn.q_bias')
 					state_dict.pop(f'encoder.blocks.{block_id}.attn.v_bias')
 					state_dict[new_key] = weight
@@ -292,15 +302,23 @@ def init_from_mae_pretrain_(module,
 						   f'unexpected_keys:{unexpected_keys}')
 						   
 
-def init_from_k600_pretrain_(module, pretrained, init_module):
+def init_from_kinetics_pretrain_(module, pretrained, init_module=None):
 	if torch.cuda.is_available():
 		state_dict = torch.load(pretrained)
 	else:
 		state_dict = torch.load(pretrained, map_location=torch.device('cpu'))
+	if 'state_dict' in state_dict:
+		state_dict = state_dict['state_dict']
+	
+	# meaningful?
+	replace_state_dict(state_dict)
+	'''
 	if init_module == 'transformer':
 		replace_state_dict(state_dict)
 	elif init_module == 'cls_head':
 		replace_state_dict(state_dict)
 	else:
 		raise TypeError(f'pretrained weights do not include the {init_module} module')
-	module.load_state_dict(state_dict, strict=False)
+	'''
+	msg = module.load_state_dict(state_dict, strict=False)
+	print_on_rank_zero(msg)

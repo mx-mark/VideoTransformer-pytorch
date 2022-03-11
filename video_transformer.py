@@ -1,25 +1,21 @@
 from einops import rearrange, reduce, repeat
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+import numpy as np
 
+import utils
 from transformer import PatchEmbed, TransformerContainer, get_sine_cosine_pos_emb
 from weight_init import (trunc_normal_, init_from_vit_pretrain_, 
-	init_from_mae_pretrain_, init_from_k600_pretrain_)
+	init_from_mae_pretrain_, init_from_kinetics_pretrain_)
 
-from typing import Callable, Tuple
-from pytorchvideo.layers.utils import set_attributes
-from pytorchvideo.models.vision_transformers import create_multiscale_vision_transformers
+import math
+from functools import partial
+from pytorchvideo.layers.utils import round_width, set_attributes
+from pytorchvideo.layers import MultiScaleBlock, SpatioTemporalClsPositionalEncoding
+from pytorchvideo.models.vision_transformers import MultiscaleVisionTransformers
 
-def round_width(width, multiplier, min_width=1, divisor=1):
-	if not multiplier:
-		return width
-	width *= multiplier
-	min_width = min_width or divisor
-
-	width_out = max(min_width, int(width + divisor / 2) // divisor * divisor)
-	if width_out < 0.9 * width:
-		width_out += divisor
-	return int(width_out)
 
 class TimeSformer(nn.Module):
 	"""TimeSformer. A PyTorch impl of `Is Space-Time Attention All You Need for
@@ -52,8 +48,8 @@ class TimeSformer(nn.Module):
 
 	def __init__(self,
 				 num_frames,
-				 img_size,
-				 patch_size,
+				 img_size=224,
+				 patch_size=16,
 				 pretrained=None,
 				 embed_dims=768,
 				 num_heads=12,
@@ -160,22 +156,48 @@ class TimeSformer(nn.Module):
 										self.conv_type,
 										self.attention_type,
 										self.copy_strategy)
-			elif 'vit' in self.pretrained:
+			elif 'vit_base' in self.pretrained:
 				init_from_vit_pretrain_(self,
 										self.pretrained,
 										self.conv_type,
 										self.attention_type,
 										self.copy_strategy)
 			elif 'timesformer' in self.pretrained:
-				init_from_k600_pretrain_(self,
-										 self.pretrained,
-										 'transformer')
+				init_from_kinetics_pretrain_(self,
+											 self.pretrained,
+											 'transformer')
 			else:
 				raise TypeError(f'not support the pretrained weight {self.pretrained}')
-
-	def forward(self, x):
+	
+	@torch.jit.ignore
+	def no_weight_decay_keywords(self):
+		return {'pos_embed', 'cls_token', 'mask_token'}
+	
+	def interpolate_pos_encoding(self, x, w, h):
+		npatch = x.shape[1] - 1
+		N = self.pos_embed.shape[1] - 1
+		if npatch == N and w == h:
+			return self.pos_embed
+		class_pos_embed = self.pos_embed[:, 0]
+		patch_pos_embed = self.pos_embed[:, 1:]
+		dim = x.shape[-1]
+		w0 = w // self.patch_embed.patch_size[0]
+		h0 = h // self.patch_embed.patch_size[0]
+		# we add a small number to avoid floating point error in the interpolation
+		# see discussion at https://github.com/facebookresearch/dino/issues/8
+		w0, h0 = w0 + 0.1, h0 + 0.1
+		patch_pos_embed = nn.functional.interpolate(
+			patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
+			scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
+			mode='bicubic',
+		)
+		assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
+		patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+		return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+	
+	def prepare_tokens(self, x):
 		#Tokenize
-		b = x.shape[0]
+		b, t, c, h, w = x.shape
 		x = self.patch_embed(x)
 		
 		# Add Position Embedding
@@ -189,9 +211,9 @@ class TimeSformer(nn.Module):
 		else:
 			x = torch.cat((cls_tokens, x), dim=1)
 			if self.use_learnable_pos_emb:
-				x = x + self.pos_embed
+				x = x + self.interpolate_pos_encoding(x, w, h) #self.pos_embed
 			else:
-				x = x + self.pos_embed.type_as(x).detach()
+				x = x + self.interpolate_pos_encoding(x, w, h).type_as(x).detach() #self.pos_embed
 		x = self.drop_after_pos(x)
 
 		# Add Time Embedding
@@ -220,6 +242,10 @@ class TimeSformer(nn.Module):
 				x = torch.cat((cls_tokens, x), dim=1)
 			x = self.drop_after_time(x)
 		
+		return x, b
+
+	def forward(self, x):
+		x, b = self.prepare_tokens(x)
 		# Video transformer forward
 		x = self.transformer_layers(x)
 
@@ -234,6 +260,17 @@ class TimeSformer(nn.Module):
 		else:
 			return x[:, 1:].mean(1)
 
+	def get_last_selfattention(self, x):
+		x, b = self.prepare_tokens(x)
+		x = self.transformer_layers(x, return_attention=True)
+		return x
+
+def get_vit_base_patch16_224(**kwargs):
+	vit = TimeSformer(num_frames=kwargs['num_frames'], pretrained=kwargs['pretrained'], img_size=kwargs['img_size'], 
+					  attention_type=kwargs['attention_type'], patch_size=16, embed_dims=768, num_heads=12, in_channels=3, 
+					  num_transformer_layers=12, conv_type='Conv2d', dropout_p=0., norm_layer=nn.LayerNorm,
+					  copy_strategy='repeat', use_learnable_pos_emb=True, return_cls_token=True)
+	return vit
 
 class ViViT(nn.Module):
 	"""ViViT. A PyTorch impl of `ViViT: A Video Vision Transformer`
@@ -266,8 +303,8 @@ class ViViT(nn.Module):
 
 	def __init__(self,
 				 num_frames,
-				 img_size,
-				 patch_size,
+				 img_size=224,
+				 patch_size=16,
 				 pretrained=None,
 				 embed_dims=768,
 				 num_heads=12,
@@ -408,7 +445,7 @@ class ViViT(nn.Module):
 										self.extend_strategy, 
 										self.tube_size, 
 										self.num_time_transformer_layers)
-			elif 'vit' in self.pretrained:
+			elif 'vit_base' in self.pretrained:
 				init_from_vit_pretrain_(self,
 										self.pretrained,
 										self.conv_type,
@@ -417,10 +454,18 @@ class ViViT(nn.Module):
 										self.extend_strategy, 
 										self.tube_size, 
 										self.num_time_transformer_layers)
+			elif 'vivit' in self.pretrained:
+				init_from_kinetics_pretrain_(self,
+											 self.pretrained,
+											 'transformer')
 			else:
 				raise TypeError(f'not support the pretrained weight {self.pretrained}')
+	
+	@torch.jit.ignore
+	def no_weight_decay_keywords(self):
+		return {'pos_embed', 'cls_token', 'mask_token'}
 
-	def forward(self, x):
+	def prepare_tokens(self, x):
 		#Tokenize
 		b = x.shape[0]
 		x = self.patch_embed(x)
@@ -440,7 +485,7 @@ class ViViT(nn.Module):
 			else:
 				x = x + self.pos_embed.type_as(x).detach()
 		x = self.drop_after_pos(x)
-		
+
 		# Add Time Embedding
 		if self.attention_type != 'fact_encoder':
 			cls_tokens = x[:b, 0, :].unsqueeze(1)
@@ -466,7 +511,13 @@ class ViViT(nn.Module):
 				x = rearrange(x, '(b p) t d -> b (p t) d', b=b)
 				x = torch.cat((cls_tokens, x), dim=1)
 			x = self.drop_after_time(x)
-			
+		
+		return x, cls_tokens, b
+
+	def forward(self, x):
+		x, cls_tokens, b = self.prepare_tokens(x)
+		
+		if self.attention_type != 'fact_encoder':
 			x = self.transformer_layers(x)
 		else:
 			# fact encoder - CRNN style
@@ -493,6 +544,35 @@ class ViViT(nn.Module):
 		else:
 			return x[:, 1:].mean(1)
 
+	def get_last_selfattention(self, x):
+		x, cls_tokens, b = self.prepare_tokens(x)
+		
+		if self.attention_type != 'fact_encoder':
+			x = self.transformer_layers(x, return_attention=True)
+		else:
+			# fact encoder - CRNN style
+			spatial_transformer, temporal_transformer, = *self.transformer_layers,
+			x = spatial_transformer(x)
+			
+			# Add Time Embedding
+			cls_tokens = x[:b, 0, :].unsqueeze(1)
+			x = rearrange(x[:, 1:, :], '(b t) p d -> b t p d', b=b)
+			x = reduce(x, 'b t p d -> b t d', 'mean')
+			x = torch.cat((cls_tokens, x), dim=1)
+			if self.use_learnable_pos_emb:
+				x = x + self.time_embed
+			else:
+				x = x + self.time_embed.type_as(x).detach()
+			x = self.drop_after_time(x)
+			print(x.shape)
+			x = temporal_transformer(x, return_attention=True)
+		return x
+
+
+# --------------------------------------------------------
+# Written by pytorchvideo offical repo (https://github.com/facebookresearch/pytorchvideo)
+# Modified by MX
+# --------------------------------------------------------
 class PatchEmbeding(nn.Module):
 	"""
 	Transformer basic patch embedding module. Performs patchifying input, flatten and
@@ -503,27 +583,28 @@ class PatchEmbeding(nn.Module):
 	def __init__(
 		self,
 		*,
-		patch_model: nn.Module = None,
-	) -> None:
+		patch_model=None,
+	):
 		super().__init__()
 		set_attributes(self, locals())
 		assert self.patch_model is not None
 
-	def forward(self, x) -> torch.Tensor:
+	def forward(self, x):
 		x = self.patch_model(x)
 		# B C (T) H W -> B (T)HW C
 		return x.flatten(2).transpose(1, 2)
 
+
 def create_conv_patch_embed(
 	*,
-	in_channels: int,
-	out_channels: int,
-	conv_kernel_size: Tuple[int] = (1, 16, 16),
-	conv_stride: Tuple[int] = (1, 4, 4),
-	conv_padding: Tuple[int] = (1, 7, 7),
-	conv_bias: bool = True,
-	conv: Callable = nn.Conv3d,
-) -> nn.Module:
+	in_channels,
+	out_channels,
+	conv_kernel_size=(1, 16, 16),
+	conv_stride=(1, 4, 4),
+	conv_padding=(1, 7, 7),
+	conv_bias=True,
+	conv=nn.Conv3d,
+):
 	"""
 	Creates the transformer basic patch embedding. It performs Convolution, flatten and
 	transpose.
@@ -549,6 +630,189 @@ def create_conv_patch_embed(
 	)
 	return PatchEmbeding(patch_model=conv_module)
 
+
+def create_multiscale_vision_transformers(
+	*,
+	spatial_size,
+	temporal_size,
+	cls_embed_on=True,
+	sep_pos_embed=True,
+	depth=16,
+	norm="layernorm",
+	# Patch embed config.
+	input_channels=3,
+	patch_embed_dim=96,
+	conv_patch_embed_kernel=(3, 7, 7),
+	conv_patch_embed_stride=(2, 4, 4),
+	conv_patch_embed_padding=(1, 3, 3),
+	enable_patch_embed_norm=False,
+	use_2d_patch=False,
+	# Attention block config.
+	num_heads=1,
+	mlp_ratio=4.0,
+	qkv_bias=True,
+	dropout_rate_block=0.0,
+	droppath_rate_block=0.0,
+	pooling_mode="conv",
+	pool_first=False,
+	residual_pool=False,
+	depthwise_conv=True,
+	bias_on=True,
+	separate_qkv=True,
+	embed_dim_mul=None,
+	atten_head_mul=None,
+	pool_q_stride_size=None,
+	pool_kv_stride_size=None,
+	pool_kv_stride_adaptive=None,
+	pool_kvq_kernel=None,
+	head=None,
+) -> nn.Module:
+	"""
+	Build Multiscale Vision Transformers (MViT) for recognition. A Vision Transformer
+	(ViT) is a specific case of MViT that only uses a single scale attention block.
+	"""
+
+	if use_2d_patch:
+		assert temporal_size == 1, "If use_2d_patch, temporal_size needs to be 1."
+	if pool_kv_stride_adaptive is not None:
+		assert (
+			pool_kv_stride_size is None
+		), "pool_kv_stride_size should be none if pool_kv_stride_adaptive is set."
+	if norm == "layernorm":
+		norm_layer = partial(nn.LayerNorm, eps=1e-6)
+		block_norm_layer = partial(nn.LayerNorm, eps=1e-6)
+		attn_norm_layer = partial(nn.LayerNorm, eps=1e-6)
+	else:
+		raise NotImplementedError("Only supports layernorm.")
+
+	if isinstance(spatial_size, int):
+		spatial_size = (spatial_size, spatial_size)
+
+	conv_patch_op = nn.Conv2d if use_2d_patch else nn.Conv3d
+	norm_patch_embed = norm_layer(patch_embed_dim) if enable_patch_embed_norm else None
+
+	patch_embed = None
+	input_dims = [temporal_size, spatial_size[0], spatial_size[1]]
+	input_stirde = (
+		(1,) + tuple(conv_patch_embed_stride)
+		if use_2d_patch
+		else conv_patch_embed_stride
+	)
+
+	patch_embed_shape = (
+		[input_dims[i] // input_stirde[i] for i in range(len(input_dims))]
+	)
+
+	cls_positional_encoding = SpatioTemporalClsPositionalEncoding(
+		embed_dim=patch_embed_dim,
+		patch_embed_shape=patch_embed_shape,
+		sep_pos_embed=sep_pos_embed,
+		has_cls=cls_embed_on,
+	)
+
+	dpr = [
+		x.item() for x in torch.linspace(0, droppath_rate_block, depth)
+	]  # stochastic depth decay rule
+
+	if dropout_rate_block > 0.0:
+		pos_drop = nn.Dropout(p=dropout_rate_block)
+
+	dim_mul, head_mul = torch.ones(depth + 1), torch.ones(depth + 1)
+	if embed_dim_mul is not None:
+		for i in range(len(embed_dim_mul)):
+			dim_mul[embed_dim_mul[i][0]] = embed_dim_mul[i][1]
+	if atten_head_mul is not None:
+		for i in range(len(atten_head_mul)):
+			head_mul[atten_head_mul[i][0]] = atten_head_mul[i][1]
+
+	mvit_blocks = nn.ModuleList()
+
+	pool_q = [[] for i in range(depth)]
+	pool_kv = [[] for i in range(depth)]
+	stride_q = [[] for i in range(depth)]
+	stride_kv = [[] for i in range(depth)]
+
+	if pool_q_stride_size is not None:
+		for i in range(len(pool_q_stride_size)):
+			stride_q[pool_q_stride_size[i][0]] = pool_q_stride_size[i][1:]
+			if pool_kvq_kernel is not None:
+				pool_q[pool_q_stride_size[i][0]] = pool_kvq_kernel
+			else:
+				pool_q[pool_q_stride_size[i][0]] = [
+					s + 1 if s > 1 else s for s in pool_q_stride_size[i][1:]
+				]
+
+	# If POOL_KV_STRIDE_ADAPTIVE is not None, initialize POOL_KV_STRIDE.
+	if pool_kv_stride_adaptive is not None:
+		_stride_kv = pool_kv_stride_adaptive
+		pool_kv_stride_size = []
+		for i in range(depth):
+			if len(stride_q[i]) > 0:
+				_stride_kv = [
+					max(_stride_kv[d] // stride_q[i][d], 1)
+					for d in range(len(_stride_kv))
+				]
+			pool_kv_stride_size.append([i] + _stride_kv)
+
+	if pool_kv_stride_size is not None:
+		for i in range(len(pool_kv_stride_size)):
+			stride_kv[pool_kv_stride_size[i][0]] = pool_kv_stride_size[i][1:]
+			if pool_kvq_kernel is not None:
+				pool_kv[pool_kv_stride_size[i][0]] = pool_kvq_kernel
+			else:
+				pool_kv[pool_kv_stride_size[i][0]] = [
+					s + 1 if s > 1 else s for s in pool_kv_stride_size[i][1:]
+				]
+
+	for i in range(depth):
+		num_heads = round_width(num_heads, head_mul[i], min_width=1, divisor=1)
+		patch_embed_dim = round_width(patch_embed_dim, dim_mul[i], divisor=num_heads)
+		dim_out = round_width(
+			patch_embed_dim,
+			dim_mul[i + 1],
+			divisor=round_width(num_heads, head_mul[i + 1]),
+		)
+
+		mvit_blocks.append(
+			MultiScaleBlock(
+				dim=patch_embed_dim,
+				dim_out=dim_out,
+				num_heads=num_heads,
+				mlp_ratio=mlp_ratio,
+				qkv_bias=qkv_bias,
+				dropout_rate=dropout_rate_block,
+				droppath_rate=dpr[i],
+				norm_layer=block_norm_layer,
+				#attn_norm_layer=attn_norm_layer,
+				kernel_q=pool_q[i],
+				kernel_kv=pool_kv[i],
+				stride_q=stride_q[i],
+				stride_kv=stride_kv[i],
+				pool_mode=pooling_mode,
+				has_cls_embed=cls_embed_on,
+				pool_first=pool_first,
+				#residual_pool=residual_pool,
+				#bias_on=bias_on,
+				#depthwise_conv=depthwise_conv,
+				#separate_qkv=separate_qkv,
+			)
+		)
+
+	embed_dim = dim_out
+	norm_embed = None if norm_layer is None else norm_layer(embed_dim)
+	head_model = None
+
+	return MultiscaleVisionTransformers(
+		patch_embed=patch_embed,
+		cls_positional_encoding=cls_positional_encoding,
+		pos_drop=pos_drop if dropout_rate_block > 0.0 else None,
+		norm_patch_embed=norm_patch_embed,
+		blocks=mvit_blocks,
+		norm_embed=norm_embed,
+		head=head_model,
+	)
+
+
 class MaskFeat(nn.Module):
 	"""
 	Multiscale Vision Transformers
@@ -560,6 +824,7 @@ class MaskFeat(nn.Module):
 				 img_size=224,
 				 num_frames=16,
 				 input_channels=3,
+				 feature_dim=10,
 				 patch_embed_dim=96,
 				 conv_patch_embed_kernel=(3, 7, 7),
 				 conv_patch_embed_stride=(2, 4, 4),
@@ -570,13 +835,14 @@ class MaskFeat(nn.Module):
 				 pool_kv_stride_adaptive=[1, 8, 8],
 				 pool_kvq_kernel=[3, 3, 3],
 				 head=None,
-				 feature_dim=10,
+				 pretrained=None,
 				 **kwargs):
 		super().__init__()
 		self.num_frames = num_frames
 		self.img_size = img_size
 		self.stride = conv_patch_embed_stride
 		self.downsample_rate = 2 ** len(pool_q_stride_size)
+		self.embed_dims = 2**len(embed_dim_mul) * patch_embed_dim
 		# Get mvit from pytorchvideo
 		self.patch_embed = (
 			create_conv_patch_embed(
@@ -596,7 +862,6 @@ class MaskFeat(nn.Module):
 			pool_q_stride_size=pool_q_stride_size,
 			pool_kv_stride_adaptive=pool_kv_stride_adaptive,
 			pool_kvq_kernel=pool_kvq_kernel,
-			enable_patch_embed=False,
 			head=head)
 		in_features = self.mvit.norm_embed.normalized_shape[0]
 		out_features = feature_dim # the dimension of the predict features
@@ -610,18 +875,19 @@ class MaskFeat(nn.Module):
 		nn.init.xavier_uniform_(self.decoder_pred.weight)
 		nn.init.constant_(self.decoder_pred.bias, 0)
 		nn.init.trunc_normal_(self.mask_token, std=.02)
+		
+		if pretrained is not None:		
+			self.init_weights(pretrained)
+	
+	def init_weights(self, pretrained):
+		init_from_kinetics_pretrain_(self, pretrained)
+	
+	@torch.jit.ignore
+	def no_weight_decay_keywords(self):
+		return {'pos_embed', 'cls_token', 'mask_token'}
 
 	def forward(self, x, target_x, mask, cube_marker, visualize=False):
-		x = self.patch_embed(x.transpose(1,2))
-		# apply mask tokens
-		B, L, C = x.shape
-		mask_token = self.mask_token.expand(B, L, -1)
-		dense_mask = repeat(mask, 'b t h w -> b t (h dh) (w dw)', dh=self.downsample_rate, dw=self.downsample_rate) # nearest-neighbor resize
-		w = dense_mask.flatten(1).unsqueeze(-1).type_as(mask_token)
-		x = x * (1 - w) + mask_token * w
-		
-		# forward network
-		x = self.mvit(x)
+		x = self.forward_features(x, mask)
 		x = self.decoder_pred(x)
 		x = x[:, 1:, :]
 		
@@ -652,175 +918,66 @@ class MaskFeat(nn.Module):
 			return x, loss, mask_preds, center_index
 		else:
 			return x, loss
+	
+	def forward_features(self, x, mask=None):
+		x = self.patch_embed(x.transpose(1,2))
+		# apply mask tokens
+		B, L, C = x.shape
+		if mask is not None:
+			mask_token = self.mask_token.expand(B, L, -1)
+			dense_mask = repeat(mask, 'b t h w -> b t (h dh) (w dw)', dh=self.downsample_rate, dw=self.downsample_rate) # nearest-neighbor resize
+			w = dense_mask.flatten(1).unsqueeze(-1).type_as(mask_token)
+			x = x * (1 - w) + mask_token * w
+		# forward network
+		x = self.mvit(x)
+		return x
 
 
-def visualize_hog(orientation_histogram, save_path, s_row=224, s_col=224, orientations=9, c_row=8, c_col=8):
-	n_cells_row = int(s_row // c_row)  # number of cells along row-axis
-	n_cells_col = int(s_col // c_col)  # number of cells along col-axis
-	radius = min(c_row, c_col) // 2 - 1
-	orientations_arr = np.arange(orientations)
-	# set dr_arr, dc_arr to correspond to midpoints of orientation bins
-	orientation_bin_midpoints = (
-		np.pi * (orientations_arr + .5) / orientations)
-	dr_arr = radius * np.sin(orientation_bin_midpoints)
-	dc_arr = radius * np.cos(orientation_bin_midpoints)
-	hog_image = np.zeros((s_row, s_col), dtype=np.float64)
-	for r in range(n_cells_row):
-		for c in range(n_cells_col):
-			for o, dr, dc in zip(orientations_arr, dr_arr, dc_arr):
-				centre = tuple([r * c_row + c_row // 2,
-								c * c_col + c_col // 2])
-				rr, cc = draw.line(int(centre[0] - dc),
-								   int(centre[1] + dr),
-								   int(centre[0] + dc),
-								   int(centre[1] - dr))
-				hog_image[rr, cc] += orientation_histogram[r, c, o]
-	io.imsave(save_path, hog_image)
+def parse_args():
+	parser = argparse.ArgumentParser(description='lr receiver')
 
-
-def _hog_normalize_block(block, eps=1e-5):
-	return np.sqrt(np.sum(block ** 2) + eps ** 2)
-
-
-def _hog_channel_gradient(channel):
-	"""Compute unnormalized gradient image along `row` and `col` axes.
-
-	Parameters
-	----------
-	channel : (M, N) ndarray
-		Grayscale image or one of image channel.
-
-	Returns
-	-------
-	g_row, g_col : channel gradient along `row` and `col` axes correspondingly.
-	"""
-	g_row = np.empty(channel.shape, dtype=channel.dtype)
-	g_row[0, :] = 0
-	g_row[-1, :] = 0
-	g_row[1:-1, :] = channel[2:, :] - channel[:-2, :]
-	g_col = np.empty(channel.shape, dtype=channel.dtype)
-	g_col[:, 0] = 0
-	g_col[:, -1] = 0
-	g_col[:, 1:-1] = channel[:, 2:] - channel[:, :-2]
-
-	return g_row, g_col
-
-
-from skimage._shared import utils
-@utils.channel_as_last_axis(multichannel_output=False)
-@utils.deprecate_multichannel_kwarg(multichannel_position=8)
-def get_hog_norm(image, orientations=9, pixels_per_cell=(8, 8), cells_per_block=(3, 3),
-		transform_sqrt=False, multichannel=None, *, channel_axis=None):
-	#Extract Histogram of Oriented Gradients (HOG) for a given image.
-	image = np.atleast_2d(image)
-	float_dtype = utils._supported_float_type(image.dtype)
-	image = image.astype(float_dtype, copy=False)
-
-	multichannel = channel_axis is not None
-	ndim_spatial = image.ndim - 1 if multichannel else image.ndim
-	if ndim_spatial != 2:
-		raise ValueError('Only images with two spatial dimensions are '
-						 'supported. If using with color/multichannel '
-						 'images, specify `channel_axis`.')
-
-	"""
-	The first stage applies an optional global image normalization
-	equalisation that is designed to reduce the influence of illumination
-	effects. In practice we use gamma (power law) compression, either
-	computing the square root or the log of each color channel.
-	Image texture strength is typically proportional to the local surface
-	illumination so this compression helps to reduce the effects of local
-	shadowing and illumination variations.
-	"""
-
-	if transform_sqrt:
-		image = np.sqrt(image)
-
-	"""
-	The second stage computes first order image gradients. These capture
-	contour, silhouette and some texture information, while providing
-	further resistance to illumination variations. The locally dominant
-	color channel is used, which provides color invariance to a large
-	extent. Variant methods may also include second order image derivatives,
-	which act as primitive bar detectors - a useful feature for capturing,
-	e.g. bar like structures in bicycles and limbs in humans.
-	"""
-
-	g_row, g_col = _hog_channel_gradient(image)
-
-	"""
-	The third stage aims to produce an encoding that is sensitive to
-	local image content while remaining resistant to small changes in
-	pose or appearance. The adopted method pools gradient orientation
-	information locally in the same way as the SIFT [Lowe 2004]
-	feature. The image window is divided into small spatial regions,
-	called "cells". For each cell we accumulate a local 1-D histogram
-	of gradient or edge orientations over all the pixels in the
-	cell. This combined cell-level 1-D histogram forms the basic
-	"orientation histogram" representation. Each orientation histogram
-	divides the gradient angle range into a fixed number of
-	predetermined bins. The gradient magnitudes of the pixels in the
-	cell are used to vote into the orientation histogram.
-	"""
-
-	s_row, s_col = image.shape[:2]
-	c_row, c_col = pixels_per_cell
-	b_row, b_col = cells_per_block
-
-	n_cells_row = int(s_row // c_row)  # number of cells along row-axis
-	n_cells_col = int(s_col // c_col)  # number of cells along col-axis
-
-	# compute orientations integral images
-	orientation_histogram = np.zeros((n_cells_row, n_cells_col, orientations),
-									 dtype=float)
-	g_row = g_row.astype(float, copy=False)
-	g_col = g_col.astype(float, copy=False)
-
-	_hoghistogram.hog_histograms(g_col, g_row, c_col, c_row, s_col, s_row,
-								 n_cells_col, n_cells_row,
-								 orientations, orientation_histogram)
-
-	"""
-	The fourth stage computes normalization, which takes local groups of
-	cells and contrast normalizes their overall responses before passing
-	to next stage. Normalization introduces better invariance to illumination,
-	shadowing, and edge contrast. It is performed by accumulating a measure
-	of local histogram "energy" over local groups of cells that we call
-	"blocks". The result is used to normalize each cell in the block.
-	Typically each individual cell is shared between several blocks, but
-	its normalizations are block dependent and thus different. The cell
-	thus appears several times in the final output vector with different
-	normalizations. This may seem redundant but it improves the performance.
-	We refer to the normalized block descriptors as Histogram of Oriented
-	Gradient (HOG) descriptors.
-	"""
-
-	n_blocks_row = (n_cells_row - b_row) + 1
-	n_blocks_col = (n_cells_col - b_col) + 1
-	normalized_blocks = np.zeros(
-		(n_blocks_row, n_blocks_col, 1),
-		dtype=float_dtype
-	)
-
-	for r in range(n_blocks_row):
-		for c in range(n_blocks_col):
-			block = orientation_histogram[r:r + b_row, c:c + b_col, :]
-			normalized_blocks[r, c, :] = \
-				_hog_normalize_block(block)
-
-	return normalized_blocks
-
+	# Model
+	parser.add_argument(
+		'-arch', type=str, default='mvit',
+		help='the choosen model arch from [timesformer, vivit]')
+	# Training/Optimization parameters
+	parser.add_argument(
+		'-optim_type', type=str, default='adamw',
+		help='the optimizer using in the training')
+	parser.add_argument(
+		'-lr', type=float, default=0.0005,
+		help='the initial learning rate')
+	parser.add_argument(
+		'-layer_decay', type=float, default=1,
+		help='the value of layer_decay')
+	parser.add_argument(
+		'-weight_decay', type=float, default=0.05, 
+		help="""Initial value of the weight decay. With ViT, a smaller value at the beginning of training works well.""")
+	
+	args = parser.parse_args()
+	
+	return args
 
 if __name__ == '__main__':
 	# Unit test for model runnable experiment and Hog prediction
+	import random
 	import numpy as np
-	from mask_generator import CubeMaskGenerator
+	#from mask_generator import CubeMaskGenerator
 	import data_transform as T
-	from dataset import DecordInit, extract_hog_features
-	from skimage import io, draw
-	from skimage.feature import _hoghistogram
-	from torchvision.transforms import ToPILImage
-	device = torch.device('cuda:0')
+	from dataset import DecordInit, extract_hog_features, temporal_sampling, denormalize, show_processed_image
+	#from skimage import io, draw
+	#from skimage.feature import _hoghistogram
+	#from torchvision.transforms import ToPILImage
+	device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+	
+	model = MaskFeat(pool_q_stride_size=[[1, 1, 2, 2], [3, 1, 2, 2]], feature_dim=2*2*2*3*9)
+	for name, param in model.decoder_pred.named_parameters():
+		param.requires_grad = False
+	from optimizer import build_optimizer
+	import argparse
+	hparams = parse_args()
+	optimizer = build_optimizer(hparams, model, is_pretrain=False)
+	print(optimizer)
 	
 	'''
 	model = TimeSformer(num_frames=4,
@@ -848,6 +1005,7 @@ if __name__ == '__main__':
 	np.random.seed(SEED)
 	random.seed(SEED)
 	'''
+	'''
 	# 1. laod pretrained model
 	from weight_init import replace_state_dict
 	model_name = 'maskfeat'
@@ -856,7 +1014,7 @@ if __name__ == '__main__':
 	
 	replace_state_dict(state_dict)
 	missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-	print(missing_keys, unexpected_keys)
+	utils.print_on_rank_zero(missing_keys, unexpected_keys)
 	model.eval()
 	model = model.to(device)
 	
@@ -870,6 +1028,7 @@ if __name__ == '__main__':
 	v_reader = v_decoder(path)
 	# Sampling video frames
 	total_frames = len(v_reader)
+
 	align_transform = T.Compose([
 		T.RandomResizedCrop(size=(224, 224), area_range=(0.9, 1.0), interpolation=3), #InterpolationMode.BICUBIC
 		])
@@ -924,3 +1083,4 @@ if __name__ == '__main__':
 	img_mask = unnorm_video.permute(0,2,3,1)[center_index][0,:,:,0] * mask[center_index][0]
 	save_path = f"./mask_img.jpg"
 	io.imsave(save_path, img_mask.numpy())
+	'''

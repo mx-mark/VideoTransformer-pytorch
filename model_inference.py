@@ -8,7 +8,7 @@ from dataset import DecordInit, load_annotation_data
 import data_transform as T
 from transformer import ClassificationHead
 from video_transformer import TimeSformer
-from weight_init import init_from_k600_pretrain_
+from weight_init import init_from_kinetics_pretrain_
 
 def parse_args():
     parser = argparse.ArgumentParser(description='lr receiver')
@@ -47,7 +47,7 @@ if __name__ == '__main__':
 						use_learnable_pos_emb=True,
 						return_cls_token=True)
 	cls_head = ClassificationHead(num_classes=600, in_channels=768)
-	init_from_k600_pretrain_(cls_head, pretrain_pth, init_module='cls_head')
+	init_from_kinetics_pretrain_(cls_head, pretrain_pth, init_module='cls_head')
 	model.eval()
 	cls_head.eval()
 	
