@@ -92,20 +92,6 @@ root_dir
 │   │   ├── log
 ```
 
-### Inference
-```bash
-# path to Kinetics600 pre-trained model
-PRETRAIN_PATH='/path/to/pre-trained model'
-# path to the test video sample
-VIDEO_PATH='/path/to/video sample'
-
-python model_inference.py \
-	-pretrain PRETRAIN_PATH \
-	-video_path VIDEO_PATH \
-	-num_frames 8 \
-	-frame_interval 32 \
-```
-
 ## Result
 ### Kinetics-400/600
 
