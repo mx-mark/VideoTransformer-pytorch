@@ -49,13 +49,13 @@ In order to make clear whether to add the `class_token` into the module forward 
 	- Pre-train the model through the dominated self-supervised methods, e.g [Mask Image Modeling](https://arxiv.org/abs/2111.06377).
 
 ## Setup
-```bash
+```shell
 pip install -r requirements.txt
 ```
 
 ## Usage
 ### Training
-```bash
+```shell
 # path to Kinetics400 train set and val set
 TRAIN_DATA_PATH='/path/to/Kinetics400/train_list.txt'
 VAL_DATA_PATH='/path/to/Kinetics400/val_list.txt'
