@@ -62,6 +62,7 @@ VAL_DATA_PATH='/path/to/Kinetics400/val_list.txt'
 # path to root directory
 ROOT_DIR='/path/to/work_space'
 
+# finetune with imagenet pretrain weights
 python model_pretrain.py \
 	-lr 0.005 \
 	-pretrain 'vit' \
@@ -76,9 +77,29 @@ python model_pretrain.py \
 	-num_class 400 \
 	-optim_type 'sgd' \
 	-lr_schedule 'cosine' \
-	-root_dir ROOT_DIR \
-	-train_data_path TRAIN_DATA_PATH \
-	-val_data_path VAL_DATA_PATH
+	-root_dir $ROOT_DIR \
+	-train_data_path $TRAIN_DATA_PATH \
+	-val_data_path $VAL_DATA_PATH
+
+# finetune with maskfeat pretrain weights
+python model_pretrain.py \
+	-lr 0.005 \
+	-epoch 200 \
+	-batch_size 8 \
+	-num_workers 4 \
+	-num_frames 16 \
+	-frame_interval 4 \
+	-num_class 400 \
+	-arch 'mvit' \
+	-optim_type 'adamw' \
+	-lr_schedule 'cosine' \
+	-objective 'supervised' \
+	-mixup True \
+	-auto_augment 'rand_aug' \
+	-pretrain 'maskfeat' \
+	-root_dir $ROOT_DIR \
+	-train_data_path $TRAIN_DATA_PATH \
+	-val_data_path $VAL_DATA_PATH
 ```
 The minimal folder structure will look like as belows.
 ```
