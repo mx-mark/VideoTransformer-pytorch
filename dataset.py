@@ -145,9 +145,9 @@ class Kinetics(torch.utils.data.Dataset):
 		self.objective = self.configs.objective
 		self.v_decoder = DecordInit()
 
-		#mask
+		# mask
 		if self.objective == 'mim':
-			self.mask_generator = CubeMaskGenerator(input_size=(8,14,14),min_num_patches=16)
+			self.mask_generator = CubeMaskGenerator(input_size=(self.target_video_len//2,14,14),min_num_patches=16)
 
 	def __getitem__(self, index):
 		while True:
@@ -184,8 +184,21 @@ class Kinetics(torch.utils.data.Dataset):
 
 		# Label (depends)
 		if self.objective == 'mim':
-			label = np.stack(list(map(extract_hog_features, video.permute(0,2,3,1).numpy())), axis=0) # T H W C -> T H' W' C'
+			# old version
+			'''
 			mask, cube_marker = self.mask_generator() # T' H' W'
+			label = np.stack(list(map(extract_hog_features, video.permute(0,2,3,1).numpy())), axis=0) # T H W C -> T H' W' C'
+			'''
+			# new version
+			mask, cube_marker = self.mask_generator() # T' H' W'
+			hog_inputs = video.permute(0,2,3,1).numpy()
+			hog_features = np.zeros((self.target_video_len,14,14,2*2*3*9))
+			# speed up the extraction of hog features
+			for marker in cube_marker: # [[start, span]]
+				start_frame, span_frame = marker
+				center_index = start_frame*2 + span_frame*2//2 # fix the temporal stride to 2
+				hog_features[center_index] = extract_hog_features(hog_inputs[center_index])
+			label = hog_features
 		else:
 			label = self.data[index]['label']
 		

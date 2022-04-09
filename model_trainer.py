@@ -44,12 +44,10 @@ class VideoTransformer(pl.LightningModule):
 				 ckpt_dir,
 				 do_eval,
 				 do_test,
-				 pretrained,
 				 n_crops=3):
 		super().__init__()
 		self.configs = configs
 		self.trainer = trainer
-		self.momentum_update = False
 
 		# build models
 		if self.configs.objective =='mim': 
@@ -58,21 +56,23 @@ class VideoTransformer(pl.LightningModule):
 			# load pretrain weights from pretrained weight path and model.init_weights method
 			if self.configs.arch == 'vivit':
 				self.model = ViViT(
-					pretrained=pretrained,
+					pretrain_pth=self.configs.pretrain_pth,
+					weights_from=self.configs.weights_from,
 					img_size=self.configs.img_size,
 					num_frames=self.configs.num_frames,
 					attention_type=self.configs.attention_type)
 			elif self.configs.arch == 'timesformer':
 				self.model = TimeSformer(
-					pretrained=pretrained,
+					pretrain_pth=self.configs.pretrain_pth,
+					weights_from=self.configs.weights_from,
 					img_size=self.configs.img_size,
 					num_frames=self.configs.num_frames,
 					attention_type=self.configs.attention_type)
-			else: #mvit
+			else: # arch-mvit
 				self.model = MaskFeat(
 					pool_q_stride_size=[[1, 1, 2, 2], [3, 1, 2, 2]], 
 					feature_dim=2*2*2*3*9,
-					pretrained=pretrained,
+					pretrain_pth=self.configs.pretrain_pth,
 					img_size=self.configs.img_size,
 					num_frames=self.configs.num_frames)
 				for name, param in self.model.decoder_pred.named_parameters():
@@ -116,7 +116,6 @@ class VideoTransformer(pl.LightningModule):
 			optimizer = build_optimizer(self.configs, model, is_pretrain=is_pretrain)
 		else:
 			optimizer = build_optimizer(self.configs, self, is_pretrain=is_pretrain)
-		#print(optimizer)
 		
 		# lr schedule
 		lr_scheduler = None
@@ -142,17 +141,6 @@ class VideoTransformer(pl.LightningModule):
 			inputs, labels, = *batch,
 			if self.configs.mixup and train:
 				inputs, labels = self.mixup_fn(inputs, labels)
-				'''
-				bs = inputs.shape[0]
-				if self.configs.data_statics == 'imagenet':
-					mean, std = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
-				elif self.configs.data_statics == 'kinetics':
-					mean, std = (0.45, 0.45, 0.45), (0.225, 0.225, 0.225)
-				else:
-					mean, std = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
-				for b in range(bs):
-					utils.show_processed_image(inputs[b].permute(0,2,3,1), save_dir='./', mean=mean, std=std, index=b)
-				'''
 			return inputs, labels
 
 	# epoch schedule
@@ -218,8 +206,12 @@ class VideoTransformer(pl.LightningModule):
 					preds = self.model(inputs)
 			preds = self.cls_head(preds)
 			loss = self.loss_fn(preds, labels)
-			top1_acc = self.train_top1_acc(preds.softmax(dim=-1), labels.argmax(-1))
-			top5_acc = self.train_top5_acc(preds.softmax(dim=-1), labels.argmax(-1))
+			if self.configs.mixup:
+				top1_acc = self.train_top1_acc(preds.softmax(dim=-1), labels.argmax(-1))
+				top5_acc = self.train_top5_acc(preds.softmax(dim=-1), labels.argmax(-1))
+			else:
+				top1_acc = self.train_top1_acc(preds.softmax(dim=-1), labels)
+				top5_acc = self.train_top5_acc(preds.softmax(dim=-1), labels)
 			self.log_step_state(data_time, top1_acc, top5_acc)
 			return {'loss': loss, 'data_time': data_time}
 	

@@ -72,7 +72,7 @@ def build_finetune_optimizer(hparams, model):
 			get_layer_func = partial(get_mvit_layer, num_layers=num_layers + 2)
 			scales = list(hparams.layer_decay ** i for i in reversed(range(num_layers + 2))) #layer_decay=1 disable
 	else:
-		raise NotImplementedError
+		return build_pretrain_optimizer(hparams, model)
 
 	skip = {}
 	skip_keywords = {}

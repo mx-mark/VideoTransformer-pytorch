@@ -1,5 +1,3 @@
-#import comet_ml
-
 import os
 import time
 import random
@@ -10,8 +8,6 @@ import kornia.augmentation as K
 import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning.plugins import DDPPlugin
-#from pytorch_lightning.loggers import CometLogger
-#from pytorch_lightning.plugins.ddp_plugin import DDPPlugin
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 import torch
 import torch.utils.data as data
@@ -47,7 +43,7 @@ def parse_args():
 		help='the intervals of saving model')
 	parser.add_argument(
 		'-objective', type=str, default='mim',
-		help='the learning objective from [mim, dino, supervised]')
+		help='the learning objective from [mim, supervised]')
 	parser.add_argument(
 		'-eval_metrics', type=str, default='finetune',
 		help='the eval metrics choosen from [linear_prob, finetune]')
@@ -56,9 +52,6 @@ def parse_args():
 	parser.add_argument(
 		'-gpus', nargs='+', type=int, default=-1,
 		help='the avaiable gpus in this experiment')
-	parser.add_argument(
-		'-nccl_ifname', type=str, default='lan2',
-		help='the nccl socket ifname can be found using ifconfig command')
 	parser.add_argument(
 		'-root_dir', type=str, required=True,
 		help='the path to root dir for work space')
@@ -109,8 +102,11 @@ def parse_args():
 		'-attention_type', type=str, default='divided_space_time',
 		help='the choosen attention type using in model')
 	parser.add_argument(
-		'-pretrain', type=str, default='vit',
-		help='the pretrain params from [mae, vit]')
+		'-pretrain_pth', type=str, default=None,
+		help='the path to the pretrain weights')
+	parser.add_argument(
+		'-weights_from', type=str, default='imagenet',
+		help='the pretrain params from [imagenet, kinetics]')
 
 	# Training/Optimization parameters
 	parser.add_argument(
@@ -157,7 +153,6 @@ def parse_args():
 
 def single_run():
 	args = parse_args()
-	#os.environ['NCCL_SOCKET_IFNAME'] = args.nccl_ifname #'lan1'
 	warnings.filterwarnings('ignore')
 	
 	# linear learning rate scale
@@ -170,22 +165,12 @@ def single_run():
 
 	# Experiment Settings
 	ROOT_DIR = args.root_dir
-	if 'mae' in args.pretrain:
-		ckpt_pth = 'pretrain_model/pretrain_mae_vit_base_mask_0.75_400e.pth'
-		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
-	elif 'maskfeat' in args.pretrain:
-		ckpt_pth = 'pretrain_model/maskfeat.pth'
-		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
-	else:
-		ckpt_pth = 'pretrain_model/vit_base_patch16_224.pth'
-		pretrain_pth = os.path.join(ROOT_DIR, ckpt_pth)
-
 	exp_tag = (f'objective_{args.objective}_arch_{args.arch}_lr_{args.lr}_'
 			   f'optim_{args.optim_type}_lr_schedule_{args.lr_schedule}_'
 			   f'fp16_{args.use_fp16}_weight_decay_{args.weight_decay}_'
 			   f'weight_decay_end_{args.weight_decay_end}_warmup_epochs_{args.warmup_epochs}_'
-			   f'pretrain_{args.pretrain}_seed_{args.seed}_eval_metrics_{args.eval_metrics}_'
-			   f'img_size_{args.img_size}_num_frames_{args.num_frames}_'
+			   f'pretrain_{args.pretrain_pth}_weights_from_{args.weights_from}_seed_{args.seed}_'
+			   f'img_size_{args.img_size}_num_frames_{args.num_frames}_eval_metrics_{args.eval_metrics}_'
 			   f'frame_interval_{args.frame_interval}_mixup_{args.mixup}_'
 			   f'multi_crop_{args.multi_crop}_auto_augment_{args.auto_augment}_')
 	ckpt_dir = os.path.join(ROOT_DIR, f'results/{exp_tag}/ckpt')
@@ -213,17 +198,15 @@ def single_run():
 		find_unused_parameters = False
 
 	trainer = pl.Trainer(
-		gpus=args.gpus, # devices=-1
-		accelerator="ddp", # accelerator="gpu",strategy='ddp'
+		gpus=args.gpus, 
+		accelerator="ddp",
 		precision=16,
-		#profiler="advanced",
 		plugins=[DDPPlugin(find_unused_parameters=find_unused_parameters),],
 		max_epochs=args.epoch,
 		callbacks=[
 			LearningRateMonitor(logging_interval='step'),
 		],
 		resume_from_checkpoint=args.resume_from_checkpoint,
-		#logger=comet_logger,
 		check_val_every_n_epoch=1,
 		log_every_n_steps=args.log_interval,
 		progress_bar_refresh_rate=args.log_interval,
@@ -240,13 +223,11 @@ def single_run():
 							 trainer=trainer,
 							 ckpt_dir=ckpt_dir,
 							 do_eval=do_eval,
-							 do_test=do_test,
-							 pretrained=pretrain_pth)
+							 do_test=do_test)
 	print_on_rank_zero(args)
 	timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
 	print_on_rank_zero(f'{timestamp} - INFO - Start running,')
 	trainer.fit(model, data_module)
-	#trainer.test(model, data_module)
 	
 if __name__ == '__main__':
 	single_run()

@@ -302,23 +302,14 @@ def init_from_mae_pretrain_(module,
 						   f'unexpected_keys:{unexpected_keys}')
 						   
 
-def init_from_kinetics_pretrain_(module, pretrained, init_module=None):
+def init_from_kinetics_pretrain_(module, pretrain_pth):
 	if torch.cuda.is_available():
-		state_dict = torch.load(pretrained)
+		state_dict = torch.load(pretrain_pth)
 	else:
-		state_dict = torch.load(pretrained, map_location=torch.device('cpu'))
+		state_dict = torch.load(pretrain_pth, map_location=torch.device('cpu'))
 	if 'state_dict' in state_dict:
 		state_dict = state_dict['state_dict']
 	
-	# meaningful?
 	replace_state_dict(state_dict)
-	'''
-	if init_module == 'transformer':
-		replace_state_dict(state_dict)
-	elif init_module == 'cls_head':
-		replace_state_dict(state_dict)
-	else:
-		raise TypeError(f'pretrained weights do not include the {init_module} module')
-	'''
 	msg = module.load_state_dict(state_dict, strict=False)
 	print_on_rank_zero(msg)

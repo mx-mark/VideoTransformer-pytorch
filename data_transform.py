@@ -517,21 +517,6 @@ def transforms_train(img_size=224,
 
 	secondary_tfl = []
 	if auto_augment:
-		'''
-		assert isinstance(auto_augment, str)
-		if isinstance(img_size, (tuple, list)):
-			img_size_min = min(img_size)
-		else:
-			img_size_min = img_size
-		aa_params = dict(
-			translate_const=int(img_size_min * 0.45),
-			img_mean=tuple([min(255, round(255 * x)) for x in mean]),
-		)
-		if interpolation and interpolation != 'random':
-			aa_params['interpolation'] = str_to_interp_mode(interpolation)
-		if auto_augment.startswith('rand'):
-			secondary_tfl += [rand_augment_transform(auto_augment, aa_params)]
-		'''
 		secondary_tfl += [transforms.autoaugment.RandAugment()]
 	elif color_jitter is not None:
 		# color jitter is enabled when not using AA
@@ -552,7 +537,6 @@ def transforms_train(img_size=224,
 			std=torch.tensor(std))
 	]
 
-	#return transforms.Compose(primary_tfl + secondary_tfl + final_tfl)
 	return Compose(primary_tfl + secondary_tfl + final_tfl)
 
 

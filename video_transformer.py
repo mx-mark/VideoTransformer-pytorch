@@ -50,7 +50,8 @@ class TimeSformer(nn.Module):
 				 num_frames,
 				 img_size=224,
 				 patch_size=16,
-				 pretrained=None,
+				 pretrain_pth=None,
+				 weights_from='imagenet',
 				 embed_dims=768,
 				 num_heads=12,
 				 num_transformer_layers=12,
@@ -68,7 +69,8 @@ class TimeSformer(nn.Module):
 			f'Unsupported Attention Type {attention_type}!')
 
 		self.num_frames = num_frames
-		self.pretrained = pretrained
+		self.pretrain_pth = pretrain_pth
+		self.weights_from = weights_from
 		self.embed_dims = embed_dims
 		self.num_transformer_layers = num_transformer_layers
 		self.attention_type = attention_type
@@ -149,26 +151,19 @@ class TimeSformer(nn.Module):
 				nn.init.trunc_normal_(self.time_embed, std=.02)
 		trunc_normal_(self.cls_token, std=.02)
 		
-		if self.pretrained is not None:
-			if 'mae' in self.pretrained:
-				init_from_mae_pretrain_(self,
-										self.pretrained,
-										self.conv_type,
-										self.attention_type,
-										self.copy_strategy)
-			elif 'vit_base' in self.pretrained:
+		if self.pretrain_pth is not None:
+			if self.weights_from == 'imagenet':
 				init_from_vit_pretrain_(self,
-										self.pretrained,
+										self.pretrain_pth,
 										self.conv_type,
 										self.attention_type,
 										self.copy_strategy)
-			elif 'timesformer' in self.pretrained:
+			elif self.weights_from == 'kinetics':
 				init_from_kinetics_pretrain_(self,
-											 self.pretrained,
-											 'transformer')
+											 self.pretrain_pth)
 			else:
-				raise TypeError(f'not support the pretrained weight {self.pretrained}')
-	
+				raise TypeError(f'not support the pretrained weight {self.pretrain_pth}')
+
 	@torch.jit.ignore
 	def no_weight_decay_keywords(self):
 		return {'pos_embed', 'cls_token', 'mask_token'}
@@ -266,9 +261,9 @@ class TimeSformer(nn.Module):
 		return x
 
 def get_vit_base_patch16_224(**kwargs):
-	vit = TimeSformer(num_frames=kwargs['num_frames'], pretrained=kwargs['pretrained'], img_size=kwargs['img_size'], 
-					  attention_type=kwargs['attention_type'], patch_size=16, embed_dims=768, num_heads=12, in_channels=3, 
-					  num_transformer_layers=12, conv_type='Conv2d', dropout_p=0., norm_layer=nn.LayerNorm,
+	vit = TimeSformer(num_frames=kwargs['num_frames'], pretrain_pth=kwargs['pretrain_pth'], weights_from=kwargs['weights_from'],
+					  img_size=kwargs['img_size'], attention_type=kwargs['attention_type'], patch_size=16, embed_dims=768, num_heads=12,
+					  in_channels=3, num_transformer_layers=12, conv_type='Conv2d', dropout_p=0., norm_layer=nn.LayerNorm,
 					  copy_strategy='repeat', use_learnable_pos_emb=True, return_cls_token=True)
 	return vit
 
@@ -305,7 +300,8 @@ class ViViT(nn.Module):
 				 num_frames,
 				 img_size=224,
 				 patch_size=16,
-				 pretrained=None,
+				 pretrain_pth=None,
+				 weights_from='imagenet',
 				 embed_dims=768,
 				 num_heads=12,
 				 num_transformer_layers=12,
@@ -326,7 +322,8 @@ class ViViT(nn.Module):
 		
 		num_frames = num_frames//tube_size
 		self.num_frames = num_frames
-		self.pretrained = pretrained
+		self.pretrain_pth = pretrain_pth
+		self.weights_from = weights_from
 		self.embed_dims = embed_dims
 		self.num_transformer_layers = num_transformer_layers
 		self.attention_type = attention_type
@@ -435,32 +432,22 @@ class ViViT(nn.Module):
 			nn.init.trunc_normal_(self.time_embed, std=.02)
 		trunc_normal_(self.cls_token, std=.02)
 		
-		if self.pretrained is not None:
-			if 'mae' in self.pretrained:
-				init_from_mae_pretrain_(self,
-										self.pretrained,
-										self.conv_type,
-										self.attention_type,
-										self.copy_strategy,
-										self.extend_strategy, 
-										self.tube_size, 
-										self.num_time_transformer_layers)
-			elif 'vit_base' in self.pretrained:
+		if self.pretrain_pth is not None:
+			if self.weights_from == 'imagenet':
 				init_from_vit_pretrain_(self,
-										self.pretrained,
+										self.pretrain_pth,
 										self.conv_type,
 										self.attention_type,
 										self.copy_strategy,
 										self.extend_strategy, 
 										self.tube_size, 
 										self.num_time_transformer_layers)
-			elif 'vivit' in self.pretrained:
+			elif self.weights_from == 'kinetics':
 				init_from_kinetics_pretrain_(self,
-											 self.pretrained,
-											 'transformer')
+											 self.pretrain_pth)
 			else:
-				raise TypeError(f'not support the pretrained weight {self.pretrained}')
-	
+				raise TypeError(f'not support the pretrained weight {self.pretrain_pth}')
+
 	@torch.jit.ignore
 	def no_weight_decay_keywords(self):
 		return {'pos_embed', 'cls_token', 'mask_token'}
@@ -835,7 +822,7 @@ class MaskFeat(nn.Module):
 				 pool_kv_stride_adaptive=[1, 8, 8],
 				 pool_kvq_kernel=[3, 3, 3],
 				 head=None,
-				 pretrained=None,
+				 pretrain_pth=None,
 				 **kwargs):
 		super().__init__()
 		self.num_frames = num_frames
@@ -876,11 +863,11 @@ class MaskFeat(nn.Module):
 		nn.init.constant_(self.decoder_pred.bias, 0)
 		nn.init.trunc_normal_(self.mask_token, std=.02)
 		
-		if pretrained is not None:		
-			self.init_weights(pretrained)
+		if pretrain_pth is not None:		
+			self.init_weights(pretrain_pth)
 	
-	def init_weights(self, pretrained):
-		init_from_kinetics_pretrain_(self, pretrained)
+	def init_weights(self, pretrain_pth):
+		init_from_kinetics_pretrain_(self, pretrain_pth)
 	
 	@torch.jit.ignore
 	def no_weight_decay_keywords(self):
@@ -900,18 +887,20 @@ class MaskFeat(nn.Module):
 		
 		# find the center frame of the mask cube
 		mask = repeat(mask, 'b t h w -> b (t dt) h w', dt=self.stride[0])
-		center_index = torch.zeros(self.num_frames).to(torch.bool)
-		for marker in cube_marker: # [[start, span]]
-			start_frame, span_frame = marker[0]
-			center_index[start_frame*self.stride[0] + span_frame*self.stride[0]//2] = 1 # center index extends to 16
-		mask[:, ~center_index] = 0
+		center_index = torch.zeros(self.num_frames, device=mask.device).to(torch.bool)
+		for i, mark_item in enumerate(cube_marker): # loop for batch 
+			for marker in mark_item: # loop for video sample
+				start_frame, span_frame = marker
+				center_index[start_frame*self.stride[0] + span_frame*self.stride[0]//2] = 1 # center index extends to 16
+			mask[i, ~center_index] = 0
+			center_index.zero_() # reset for new sample
 		
 		# compute loss on mask regions in center frame
 		loss = (x - target_x) ** 2
 		loss = loss.mean(dim=-1)
 		loss = (loss * mask).sum() / (mask.sum() + 1e-5)
 		
-		# visulize 
+		# visulize(need to update)
 		if visualize:
 			mask_preds = x[:, center_index]
 			mask_preds = rearrange(mask_preds, 'b t h w (dh dw c o) -> b t (h dh) (w dw) c o', dh=2,dw=2,c=3,o=9) # need to unnormalize
