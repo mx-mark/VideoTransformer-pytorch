@@ -4,9 +4,9 @@ This repository is mainly built upon [Pytorch](https://pytorch.org/) and [Pytorc
 Now, we implement the [TimeSformer](https://arxiv.org/abs/2102.05095), [ViViT](https://arxiv.org/abs/2103.15691) and [MaskFeat](https://arxiv.org/abs/2112.09133). And we have pre-trained the `TimeSformer-B`, `ViViT-B` and `MaskFeat` on [Kinetics400/600](https://deepmind.com/research/open-source/kinetics), but still can't guarantee the performance reported in the paper. However, we find some relevant hyper-parameters which may help us to reach the target performance.
 
 ## Update
-1. We have fixed serval known issues and now can build script to pretrain mvit with maskfeat or finetune mvit/timesformer/vivit on K400. 
+1. We have fixed serval known issues and now can build script to pretrain `MViT-B` with `MaskFeat` or finetune `MViT-B`/`TimeSformer-B`/`ViViT-B` on K400. 
 2. We have reimplemented the methods of hog extraction and hog prediction in [MaskFeat](https://arxiv.org/abs/2112.09133) which are currently more efficient to pretrain.
-3. Note that if someone want to train timesformer or vivit with current repo, they need to carefully adjust the learning rate and weight decay for a better performance.
+3. Note that if someone want to train `TimeSformer-B` or `ViViT-B` with current repo, they need to carefully adjust the learning rate and weight decay for a better performance.
 
 ## Table of Contents
 1. [Difference](#difference)
@@ -64,25 +64,29 @@ PRETRAIN_WEIGHTS='/path/to/weights'
 
 # pretrain mvit using maskfeat
 python model_pretrain.py \
-	-lr 8e-4 -epoch 300 -batch_size 16 -num_workers 8 -frame_interval 4 -num_frames 16 -num_class 400 -root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH
+	-lr 8e-4 -epoch 300 -batch_size 16 -num_workers 8 -frame_interval 4 -num_frames 16 -num_class 400 \
+	-root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH
 
 # finetune mvit with maskfeat pretrain weights
 python model_pretrain.py \
-	-lr 0.005 -epoch 200 -batch_size 8 -num_workers 4 -num_frames 16 -frame_interval 4 -num_class 400 -arch 'mvit' -optim_type 'adamw' \
-	-lr_schedule 'cosine' -objective 'supervised' -mixup True -auto_augment 'rand_aug' -root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH \
+	-lr 0.005 -epoch 200 -batch_size 8 -num_workers 4 -num_frames 16 -frame_interval 4 -num_class 400 \
+	-arch 'mvit' -optim_type 'adamw' -lr_schedule 'cosine' -objective 'supervised' -mixup True \
+	-auto_augment 'rand_aug' -root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH \
 	-val_data_path $VAL_DATA_PATH -pretrain_pth $PRETRAIN_WEIGHTS
 
 # finetune timesformer with imagenet pretrain weights
 python model_pretrain.py \
-	-lr 0.005 -epoch 30 -batch_size 8 -num_workers 4 -num_frames 8 -frame_interval 32 -num_class 400 -arch 'timesformer' -attention_type 'divided_space_time' \
-	-optim_type 'sgd' -lr_schedule 'cosine' -objective 'supervised' -root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH -val_data_path $VAL_DATA_PATH \
-	-pretrain_pth $PRETRAIN_WEIGHTS -weights_from 'imagenet'
+	-lr 0.005 -epoch 30 -batch_size 8 -num_workers 4 -num_frames 8 -frame_interval 32 -num_class 400 \
+	-arch 'timesformer' -attention_type 'divided_space_time' -optim_type 'sgd' -lr_schedule 'cosine' \
+	-objective 'supervised' -root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH \
+	-val_data_path $VAL_DATA_PATH -pretrain_pth $PRETRAIN_WEIGHTS -weights_from 'imagenet'
 
 # finetune vivit with imagenet pretrain weights
 python model_pretrain.py \
-	-lr 0.005 -epoch 30 -batch_size 8 -num_workers 4 -num_frames 16 -frame_interval 16 -num_class 400 -arch 'vivit' -attention_type 'fact_encoder' \
-	-optim_type 'sgd' -lr_schedule 'cosine' -objective 'supervised' -root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH -val_data_path $VAL_DATA_PATH \
-	-pretrain_pth $PRETRAIN_WEIGHTS -weights_from 'imagenet'
+	-lr 0.005 -epoch 30 -batch_size 8 -num_workers 4 -num_frames 16 -frame_interval 16 -num_class 400 \
+	-arch 'vivit' -attention_type 'fact_encoder' -optim_type 'sgd' -lr_schedule 'cosine' \
+	-objective 'supervised' -root_dir $ROOT_DIR -train_data_path $TRAIN_DATA_PATH \
+	-val_data_path $VAL_DATA_PATH -pretrain_pth $PRETRAIN_WEIGHTS -weights_from 'imagenet'
 
 ```
 The minimal folder structure will look like as belows.
