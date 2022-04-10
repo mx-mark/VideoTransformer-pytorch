@@ -500,7 +500,8 @@ def transforms_train(img_size=224,
 					 auto_augment=None,
 					 interpolation='random',
 					 mean=IMAGENET_DEFAULT_MEAN,
-					 std=IMAGENET_DEFAULT_STD):
+					 std=IMAGENET_DEFAULT_STD,
+					 objective='supervised'):
 	"""
 	If separate==True, the transforms are returned as a tuple of 3 separate transforms
 	for use in a mixing dataset that passes
@@ -536,8 +537,10 @@ def transforms_train(img_size=224,
 			mean=torch.tensor(mean),
 			std=torch.tensor(std))
 	]
-
-	return Compose(primary_tfl + secondary_tfl + final_tfl)
+	if objective == 'mim':
+		return [Compose(primary_tfl + secondary_tfl), Compose(final_tfl)]
+	else:
+		return Compose(primary_tfl + secondary_tfl + final_tfl)
 
 
 def transforms_eval(img_size=224,
@@ -581,6 +584,7 @@ def create_video_transform(input_size=224,
 						   interpolation='bilinear',
 						   mean=IMAGENET_DEFAULT_MEAN,
 						   std=IMAGENET_DEFAULT_STD,
+						   objective='supervised',
 						   crop_pct=None):
 
 	if isinstance(input_size, (tuple, list)):
@@ -598,7 +602,8 @@ def create_video_transform(input_size=224,
 			auto_augment=auto_augment,
 			interpolation=interpolation,
 			mean=mean,
-			std=std)
+			std=std,
+			objective=objective)
 	else:
 		transform = transforms_eval(
 			img_size,

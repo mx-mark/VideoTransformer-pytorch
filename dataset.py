@@ -159,10 +159,7 @@ class Kinetics(torch.utils.data.Dataset):
 				# Sampling video frames
 				start_frame_ind, end_frame_ind = self.temporal_sample(total_frames)
 				assert end_frame_ind-start_frame_ind >= self.target_video_len
-				if self.multi_crop:
-					frame_indice = range(start_frame_ind, end_frame_ind)
-				else:
-					frame_indice = np.linspace(start_frame_ind, end_frame_ind-1, self.target_video_len, dtype=int)
+				frame_indice = np.linspace(start_frame_ind, end_frame_ind-1, self.target_video_len, dtype=int)
 				video = v_reader.get_batch(frame_indice).asnumpy()
 				del v_reader
 				break
@@ -174,13 +171,11 @@ class Kinetics(torch.utils.data.Dataset):
 		with torch.no_grad():
 			video = torch.from_numpy(video).permute(0,3,1,2)
 			if self.transform is not None:
-				if hasattr(self.transform, 'randomize_parameters'):
-					self.transform.randomize_parameters()
-					video = self.transform(video)
+				if self.objective == 'mim':
+					pre_transform, post_transform = self.transform
+					video = pre_transform(video) # align shape
 				else:
-					video = rearrange(video, 't c h w -> (t c) h w')
 					video = self.transform(video)
-					video = rearrange(video, '(t c) h w -> t c h w', t=self.target_video_len)
 
 		# Label (depends)
 		if self.objective == 'mim':
@@ -203,6 +198,8 @@ class Kinetics(torch.utils.data.Dataset):
 			label = self.data[index]['label']
 		
 		if self.objective == 'mim':
+			if self.transform is not None:
+				video = post_transform(video) # to tensor & norm
 			return video, numpy2tensor(label), numpy2tensor(mask), cube_marker
 		else:
 			return video, label

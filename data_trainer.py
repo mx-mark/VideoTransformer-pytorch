@@ -73,6 +73,7 @@ class KineticsDataModule(pl.LightningDataModule):
 			mean, std = (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)
 		
 		train_transform = T.create_video_transform(
+			objective=self.configs.objective,
 			input_size=self.configs.img_size,
 			is_training=True,
 			scale=scale,
