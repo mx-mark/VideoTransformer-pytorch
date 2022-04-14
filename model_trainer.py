@@ -150,7 +150,7 @@ class VideoTransformer(pl.LightningModule):
 	def _weight_decay_update(self):
 		for i, param_group in enumerate(self.optimizers().optimizer.param_groups):
 			if i == 1:  # only the first group is regularized
-				param_group["weight_decay"] = self._get_momentum(base_value=self.weight_decay, final_value=self.configs.weight_decay_end)
+				param_group["weight_decay"] = self._get_momentum(base_value=self.configs.weight_decay, final_value=self.configs.weight_decay_end)
 
 	def clip_gradients(self, clip_grad, norm_type=2):
 		layer_norm = []
