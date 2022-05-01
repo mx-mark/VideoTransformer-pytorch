@@ -107,7 +107,7 @@ root_dir
 |:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|:----:|
 | TimeSformer-B | ImageNet-21K | K600 | 15e | 8 | 224 | 78.4 | 93.6 | [Google drive](https://drive.google.com/file/d/1-BSNROh35fiOIBcmtFNgWHEY_JC5UNDx/view?usp=sharing) or [BaiduYun](https://pan.baidu.com/s/1I5L41ZFHHSvFJttYt8F0Og)(code: yr4j) | [log](demo/log_arch_timesformer_lr5e-3_bs8_nw4_open.txt) |
 | ViViT-B | ImageNet-21K | K400 | 30e | 16 | 224 | 75.2 | 91.5 | [Google drive](https://drive.google.com/file/d/1-JVhSN3QHKUOLkXLWXWn5drdvKn0gPll/view?usp=sharing) | |
-| MaskFeat(MViT-B) | K400 | K400 | 100e | 16 | 224 | | | [Google drive](https://drive.google.com/file/d/1h3Q-267qV9kIcTT9Sct-zQzVvXljhyWW/view?usp=sharing) | |
+| MaskFeat | K400 | K400 | 100e | 16 | 224 | | | [Google drive](https://drive.google.com/file/d/1h3Q-267qV9kIcTT9Sct-zQzVvXljhyWW/view?usp=sharing) | |
 
 #### 1.1 Visualize
 
