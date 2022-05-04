@@ -42,7 +42,7 @@ In order to make clear whether to add the `class_token` into the module forward 
 - [√] add `linear prob` and `finetune recipe`.
 	- Make available to transfer the pre-trained model to downstream task.
 - [ ] add more scalable Video Transformer benchmarks.
-	- We will focus more on the data-efficient models.
+	- We will mainly focus on the data-efficient models.
 - [ ] add more robust objective functions.
 	- Pre-train the model through the dominated self-supervised methods, e.g [Mask Image Modeling](https://arxiv.org/abs/2111.06377).
 
